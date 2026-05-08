@@ -1,46 +1,88 @@
-# Bitcoin Net Worth Tracker (Static Web App)
+# Bitcoin Net Worth Tracker
 
-This project is now a pure HTML/CSS/JavaScript local web app with no Python dependencies.
+A local-first dashboard for tracking assets, liabilities, and net worth in both BTC and USD.
 
-## What it does
+Repository: https://github.com/w-s-bitcoin/webapps-bitcoin-net-worth
 
-- Tracks assets and liabilities in BTC and USD terms.
-- Fetches BTCUSD from Kraken (or lets you set a manual quote).
-- Saves snapshot history in browser localStorage.
+## What It Does
+
+- Tracks assets and liabilities in BTC and USD.
+- Supports demo mode and live mode.
+- Fetches BTCUSD from Kraken, with optional manual BTCUSD override.
+- Saves and edits snapshot history.
 - Draws two built-in charts:
-   - assets and liabilities valued in BTC
-   - net worth performance in BTC vs USD
-- Exports notebook-compatible CSV files:
-   - total_net_worth_usd_vs_btc.csv
-   - historic_net_worth.csv
+   - Net worth change in BTC vs USD
+   - Assets vs liabilities in BTC
+- Supports multi-select chart filters (assets/liabilities), persisted per mode.
+- Supports undo/redo for dashboard edits (including manual quote changes and chart control changes).
+- Exports CSV files:
+   - `total_net_worth_usd_vs_btc.csv`
+   - `historic_net_worth.csv`
 
-## Run locally
+## Storage Model
 
-Option 1 (quickest):
+- Demo mode data is loaded from `history_files/demo_history.csv` and cached in browser localStorage for UI state.
+- Live mode data is stored in local files under `history_files/` via the local API server.
+- Live files support plaintext (`.csv`) or encrypted (`.enc`) storage.
 
-1. Open `index.html` in your browser.
+## Recommended Run (With Live Mode APIs)
 
-Option 2 (recommended for API compatibility):
+These launchers start the local server and open the app:
 
-1. Serve the folder with any static web server.
-2. Open the local URL from that server.
+- macOS: `launch_macos.command`
+- Linux: `launch_linux.sh`
+- Windows: `launch_windows.bat` (which invokes `launch_windows.ps1`)
 
-Examples:
+Requirements:
+
+- Python 3 available on PATH (`python3`, `python`, or `py` on Windows).
+
+Server defaults:
+
+- Host: `127.0.0.1`
+- Port: `8081`
+- URL: `http://127.0.0.1:8081/`
+
+macOS launcher supports idle auto-stop:
+
+```bash
+IDLE_TIMEOUT=180 /path/to/launch_macos.command
+```
+
+Set `IDLE_TIMEOUT=0` to disable auto-shutdown.
+
+## Alternate Run (Static Only)
+
+You can open `index.html` directly or use any static server, but live file APIs (`/api/live-history*`) require `standalone_server.py`.
+
+Example static servers:
 
 ```bash
 npx serve .
 ```
 
-or
-
 ```bash
 npx http-server .
 ```
 
-No package install is required for the app itself.
+## Local API Endpoints
 
-## File overview
+When running `standalone_server.py`, the app uses:
 
-- `index.html`: app structure
-- `styles.css`: visual theme and responsive layout
-- `app.js`: state management, math logic, history persistence, chart rendering, CSV export
+- `GET /api/live-history/files`
+- `GET /api/live-history`
+- `POST /api/live-history`
+- `GET /api/heartbeat`
+- `POST /api/heartbeat`
+
+## Project Files
+
+- `index.html`: app layout and controls
+- `styles.css`: theme and component styles
+- `app.js`: app state, calculations, persistence, chart rendering, undo/redo
+- `standalone_server.py`: local API and static file server
+- `history_files/`: demo and live history files
+- `launch_macos.command`: macOS launcher
+- `launch_linux.sh`: Linux launcher
+- `launch_windows.bat`: Windows launcher entrypoint
+- `launch_windows.ps1`: Windows launcher implementation
