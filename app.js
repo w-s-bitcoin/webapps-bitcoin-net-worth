@@ -3658,8 +3658,35 @@ async function enableLiveEncryption() {
 }
 
 async function disableLiveEncryption() {
-  // Always require password confirmation before decrypting and converting
   const hasEncFile = serverAvailable && (await fetchLiveHistoryFile()) !== null && liveHistoryFile.endsWith(".enc");
+  const hasLocalEnc = Boolean(localStorage.getItem(STORE_KEY_LIVE_ENC));
+
+  // No encrypted data source at all — just reset flags without touching file data.
+  if (!hasEncFile && !hasLocalEnc) {
+    el.liveEncryptionEnabled.checked = false;
+    liveEncryptionEnabled = false;
+    liveEncryptionPassword = null;
+    localStorage.setItem(LIVE_ENCRYPTION_ENABLED_KEY, "0");
+    await populateLiveFileMenu();
+    updateModeToggleUI();
+    return;
+  }
+
+  // When the encrypted file lives on the server, the server must be reachable so we can write
+  // the decrypted CSV back. Refusing here prevents a partial state transition where the .csv
+  // would be missing from the server and ensureLiveBaseFileIfMissing would reset all data on
+  // the next page load.
+  if (liveHistoryFile.endsWith(".enc") && !serverAvailable) {
+    alert("Cannot disable encryption while the server is offline.\nStart the server and try again.");
+    el.liveEncryptionEnabled.checked = true;
+    return;
+  }
+
+  // Capture decrypted data in local variables. Never rely on the global `snapshots` being set
+  // as a side-effect inside the validator — that was the original source of data loss.
+  let decryptedSnapshots = null;
+  let decryptedFormState = null;
+
   const pw = await promptForPassword({
     confirm: false,
     message: "Enter your encryption password to decrypt and disable encryption.",
@@ -3667,22 +3694,52 @@ async function disableLiveEncryption() {
       if (hasEncFile) {
         try {
           const raw = await fetchLiveHistoryFile();
+          if (!raw) return "Could not read encrypted file. Try again.";
           const plain = await decryptText(raw, p);
-          snapshots = parseLiveHistoryCsv(plain);
+          decryptedSnapshots = parseLiveHistoryCsv(plain);
           return null;
         } catch {
+          decryptedSnapshots = null;
           return "Incorrect password. Please try again.";
         }
       } else {
-        const ok = await unlockLiveEncryptedData(p);
-        return ok ? null : "Incorrect password. Please try again.";
+        // localStorage path: explicitly require encrypted data to exist before accepting any
+        // password. The previous code used unlockLiveEncryptedData() here, which returned true
+        // (success) even when STORE_KEY_LIVE_ENC was absent, silently setting snapshots = [].
+        const encSnap = localStorage.getItem(STORE_KEY_LIVE_ENC);
+        if (!encSnap) return "No encrypted data found in local storage.";
+        try {
+          const plain = await decryptText(encSnap, p);
+          decryptedSnapshots = parseSnapshotsRaw(plain);
+        } catch {
+          decryptedSnapshots = null;
+          return "Incorrect password. Please try again.";
+        }
+        const encForm = localStorage.getItem(FORM_KEY_LIVE_ENC);
+        if (encForm) {
+          try {
+            decryptedFormState = parseFormFromRaw(await decryptText(encForm, p), DEFAULT_FORM_LIVE);
+          } catch { /* form decrypt failure is non-fatal */ }
+        }
+        return null;
       }
     }
   });
+
   if (!pw) {
     el.liveEncryptionEnabled.checked = true;
     return;
   }
+
+  // Guard: if decryptedSnapshots is somehow null after a successful password (should never
+  // happen), abort rather than overwriting the file with empty data.
+  if (decryptedSnapshots === null) {
+    el.liveEncryptionEnabled.checked = true;
+    return;
+  }
+
+  snapshots = decryptedSnapshots;
+  if (decryptedFormState) formState = decryptedFormState;
   liveEncryptionPassword = pw;
   const csvFilename = liveHistoryFile.replace(/\.(csv|enc)$/, "") + ".csv";
   const csv = snapshotsToCsv(snapshots);
