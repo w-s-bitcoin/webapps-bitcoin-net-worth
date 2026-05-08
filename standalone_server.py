@@ -173,7 +173,7 @@ def main() -> None:
     def handler_factory(*handler_args, **handler_kwargs):
         return Handler(*handler_args, directory=str(root), **handler_kwargs)
 
-    Handler.heartbeat_touch = touch_heartbeat
+    Handler.heartbeat_touch = staticmethod(touch_heartbeat)
     server = ThreadingHTTPServer((args.host, args.port), handler_factory)
     url = f"http://{args.host}:{args.port}/"
     print(f"Bitcoin Net Worth Tracker running at {url}")
