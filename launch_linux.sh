@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PORT="${PORT:-8081}"
 HOST="127.0.0.1"
 URL="http://${HOST}:${PORT}/"
+IDLE_TIMEOUT="${IDLE_TIMEOUT:-180}"
 
 cd "$SCRIPT_DIR"
 
@@ -27,7 +28,7 @@ if command -v curl >/dev/null 2>&1 && curl -fsS "$API_URL" >/dev/null 2>&1; then
   exit 0
 fi
 
-"$PYTHON" "$SCRIPT_DIR/standalone_server.py" --host "$HOST" --port "$PORT" --root "$SCRIPT_DIR" &
+"$PYTHON" "$SCRIPT_DIR/standalone_server.py" --host "$HOST" --port "$PORT" --root "$SCRIPT_DIR" --idle-timeout "$IDLE_TIMEOUT" &
 SERVER_PID=$!
 
 cleanup() {

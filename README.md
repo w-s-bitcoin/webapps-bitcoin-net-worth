@@ -4,6 +4,19 @@ A local-first dashboard for tracking assets, liabilities, and net worth in both 
 
 Repository: https://github.com/w-s-bitcoin/webapps-bitcoin-net-worth
 
+## Quick Start
+
+- **macOS:** double-click `launch_macos.command`
+- **Linux:** run `./launch_linux.sh`
+- **Windows:** double-click `launch_windows.bat` (or run `launch_windows.ps1`)
+
+Requires Python 3 on PATH. Opens the app at `http://127.0.0.1:8081/`.
+
+> Set an idle auto-stop timeout (in seconds) via the `IDLE_TIMEOUT` environment variable (default: 180). Use `IDLE_TIMEOUT=0` to disable.
+>
+> - **macOS / Linux:** `IDLE_TIMEOUT=300 /path/to/launcher`
+> - **Windows:** `$env:IDLE_TIMEOUT=300; .\launch_windows.ps1`
+
 ## What It Does
 
 - Tracks assets and liabilities in BTC and USD.
@@ -25,56 +38,6 @@ Repository: https://github.com/w-s-bitcoin/webapps-bitcoin-net-worth
 - Live mode data is stored in local files under `history_files/` via the local API server.
 - Live files support plaintext (`.csv`) or encrypted (`.enc`) storage.
 
-## Recommended Run (With Live Mode APIs)
-
-These launchers start the local server and open the app:
-
-- macOS: `launch_macos.command`
-- Linux: `launch_linux.sh`
-- Windows: `launch_windows.bat` (which invokes `launch_windows.ps1`)
-
-Requirements:
-
-- Python 3 available on PATH (`python3`, `python`, or `py` on Windows).
-
-Server defaults:
-
-- Host: `127.0.0.1`
-- Port: `8081`
-- URL: `http://127.0.0.1:8081/`
-
-macOS launcher supports idle auto-stop:
-
-```bash
-IDLE_TIMEOUT=180 /path/to/launch_macos.command
-```
-
-Set `IDLE_TIMEOUT=0` to disable auto-shutdown.
-
-## Alternate Run (Static Only)
-
-You can open `index.html` directly or use any static server, but live file APIs (`/api/live-history*`) require `standalone_server.py`.
-
-Example static servers:
-
-```bash
-npx serve .
-```
-
-```bash
-npx http-server .
-```
-
-## Local API Endpoints
-
-When running `standalone_server.py`, the app uses:
-
-- `GET /api/live-history/files`
-- `GET /api/live-history`
-- `POST /api/live-history`
-- `GET /api/heartbeat`
-- `POST /api/heartbeat`
-
 ## Project Files
 
 - `index.html`: app layout and controls
@@ -86,3 +49,4 @@ When running `standalone_server.py`, the app uses:
 - `launch_linux.sh`: Linux launcher
 - `launch_windows.bat`: Windows launcher entrypoint
 - `launch_windows.ps1`: Windows launcher implementation
+

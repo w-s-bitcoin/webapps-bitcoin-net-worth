@@ -3,6 +3,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Port = 8081
 $HostAddr = "127.0.0.1"
 $Url = "http://$HostAddr`:$Port/"
+$IdleTimeout = if ($env:IDLE_TIMEOUT -ne $null) { $env:IDLE_TIMEOUT } else { "180" }
 
 Set-Location $ScriptDir
 
@@ -40,9 +41,9 @@ if (Test-TrackerApi -Target $apiUrl) {
 }
 
 if ($usePyLauncher) {
-  $serverProc = Start-Process -FilePath "py" -ArgumentList @("-3", "$ScriptDir\standalone_server.py", "--host", $HostAddr, "--port", "$Port", "--root", $ScriptDir) -PassThru
+  $serverProc = Start-Process -FilePath "py" -ArgumentList @("-3", "$ScriptDir\standalone_server.py", "--host", $HostAddr, "--port", "$Port", "--root", $ScriptDir, "--idle-timeout", $IdleTimeout) -PassThru
 } else {
-  $serverProc = Start-Process -FilePath "python" -ArgumentList @("$ScriptDir\standalone_server.py", "--host", $HostAddr, "--port", "$Port", "--root", $ScriptDir) -PassThru
+  $serverProc = Start-Process -FilePath "python" -ArgumentList @("$ScriptDir\standalone_server.py", "--host", $HostAddr, "--port", "$Port", "--root", $ScriptDir, "--idle-timeout", $IdleTimeout) -PassThru
 }
 
 Write-Host "Waiting for server to be ready..."
