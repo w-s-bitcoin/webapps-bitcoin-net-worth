@@ -802,7 +802,7 @@ body.light-theme .filter-checkbox-item:hover {
   border-radius: 12px;
   padding: 12px;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.28);
-  min-width: 220px;
+  width: 224px;
   user-select: none;
 }
 .date-picker-header {
@@ -877,6 +877,128 @@ body.light-theme .filter-checkbox-item:hover {
   color: #fff;
   font-weight: 700;
   border-radius: 6px;
+}
+
+/* ── Date picker – year grid & month accordion ───────────────────────────── */
+.date-picker-header-label {
+  cursor: pointer;
+}
+.date-picker-header-label:hover {
+  color: #f7931a;
+}
+.dp-year-grid-popup {
+  /* inherits fixed width from .date-picker-popup */
+}
+.dp-year-grid-popup .date-picker-header {
+  position: relative;
+}
+.dp-year-grid-popup .date-picker-header-label {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+.dp-year-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 0;
+  max-height: 184px;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.dp-year-grid::-webkit-scrollbar {
+  display: none;
+}
+.dp-year-cell {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.82rem;
+  font-weight: 500;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text);
+  transition: background 100ms ease;
+}
+.dp-year-cell:hover {
+  background: rgba(59, 130, 246, 0.22);
+}
+.dp-year-cell.dp-year-current {
+  font-weight: 700;
+  color: #f7931a;
+}
+/* Accordion list */
+.dp-accordion-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 184px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+}
+.dp-accordion-list::-webkit-scrollbar {
+  display: none;
+}
+.dp-accordion-year-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  transition: background 100ms ease;
+}
+.dp-accordion-year-btn:hover {
+  background: rgba(59, 130, 246, 0.15);
+}
+.dp-accordion-chevron {
+  font-size: 0.75rem;
+  color: var(--muted);
+  transform: rotate(0deg);
+  transition: transform 150ms ease;
+  display: inline-block;
+}
+.dp-accordion-year.dp-accordion-open .dp-accordion-chevron {
+  transform: rotate(90deg);
+}
+.dp-accordion-year.dp-accordion-open .dp-accordion-year-btn {
+  color: #f7931a;
+}
+.dp-month-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 3px;
+  padding: 4px 0 6px;
+}
+.dp-month-cell {
+  font-size: 0.75rem;
+  text-align: center;
+  padding: 4px 2px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text);
+  transition: background 100ms ease;
+}
+.dp-month-cell:hover:not(.dp-disabled) {
+  background: rgba(59, 130, 246, 0.22);
+}
+.dp-month-cell.dp-disabled {
+  color: var(--muted);
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.dp-month-cell.dp-month-current {
+  font-weight: 700;
+  color: #f7931a;
 }
 
 .btn {

@@ -300,6 +300,8 @@ function closeAllOverlays() {
 function makeDatePicker(opts) {
   let popup = null;
   let pickerYear, pickerMonth;
+  let pickerView = "days"; // "days" | "years" | "year"
+  let pickerExpandedYear = null;
   const align = opts.align === "left" ? "left" : "right";
 
   function isoToDate(iso) {
@@ -337,6 +339,9 @@ function makeDatePicker(opts) {
     next.addEventListener("click", (e) => { e.stopPropagation(); pickerMonth++; if (pickerMonth > 11) { pickerMonth = 0; pickerYear++; } rebuildCalendar(); });
     const lbl = document.createElement("span");
     lbl.textContent = monthLabel;
+    lbl.className = "date-picker-header-label";
+    lbl.title = "Select year / month";
+    lbl.addEventListener("click", (e) => { e.stopPropagation(); pickerView = "years"; pickerExpandedYear = null; rebuildCalendar(); });
     header.append(prev, lbl, next);
     wrap.appendChild(header);
 
@@ -391,10 +396,149 @@ function makeDatePicker(opts) {
     return wrap;
   }
 
+  function buildYearGrid() {
+    const minDate = isoToDate(opts.getMin());
+    const maxDate = isoToDate(opts.getMax());
+    const minYear = minDate ? minDate.getFullYear() : pickerYear - 10;
+    const maxYear = maxDate ? maxDate.getFullYear() : pickerYear + 5;
+
+    const wrap = document.createElement("div");
+    wrap.className = "date-picker-popup dp-year-grid-popup";
+
+    const header = document.createElement("div");
+    header.className = "date-picker-header";
+    const backBtn = document.createElement("button");
+    backBtn.className = "date-picker-nav";
+    backBtn.textContent = "‹";
+    backBtn.type = "button";
+    backBtn.title = "Back to calendar";
+    backBtn.addEventListener("click", (e) => { e.stopPropagation(); pickerView = "days"; rebuildCalendar(); });
+    const lbl = document.createElement("span");
+    lbl.className = "date-picker-header-label";
+    lbl.textContent = "Select Year";
+    header.append(backBtn, lbl);
+    wrap.appendChild(header);
+
+    const grid = document.createElement("div");
+    grid.className = "dp-year-grid";
+    for (let y = minYear; y <= maxYear; y++) {
+      const cell = document.createElement("div");
+      cell.className = "dp-year-cell";
+      if (y === pickerYear) cell.classList.add("dp-year-current");
+      const yearLbl = document.createElement("span");
+      yearLbl.textContent = y;
+      const yearChevron = document.createElement("span");
+      yearChevron.className = "dp-accordion-chevron";
+      yearChevron.textContent = "›";
+      cell.append(yearLbl, yearChevron);
+      cell.addEventListener("click", (e) => {
+        e.stopPropagation();
+        pickerView = "year";
+        pickerExpandedYear = y;
+        rebuildCalendar();
+      });
+      grid.appendChild(cell);
+    }
+    wrap.appendChild(grid);
+    return wrap;
+  }
+
+  function buildYearAccordion() {
+    const minDate = isoToDate(opts.getMin());
+    const maxDate = isoToDate(opts.getMax());
+    const minYear = minDate ? minDate.getFullYear() : pickerYear - 10;
+    const maxYear = maxDate ? maxDate.getFullYear() : pickerYear + 5;
+    const expandedYear = pickerExpandedYear !== null ? pickerExpandedYear : pickerYear;
+
+    const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+    const wrap = document.createElement("div");
+    wrap.className = "date-picker-popup dp-year-grid-popup";
+
+    const header = document.createElement("div");
+    header.className = "date-picker-header";
+    const backBtn = document.createElement("button");
+    backBtn.className = "date-picker-nav";
+    backBtn.textContent = "‹";
+    backBtn.type = "button";
+    backBtn.title = "Back to year list";
+    backBtn.addEventListener("click", (e) => { e.stopPropagation(); pickerView = "years"; pickerExpandedYear = null; rebuildCalendar(); });
+    const lbl = document.createElement("span");
+    lbl.className = "date-picker-header-label";
+    lbl.textContent = "Select Month";
+    header.append(backBtn, lbl);
+    wrap.appendChild(header);
+
+    const list = document.createElement("div");
+    list.className = "dp-accordion-list";
+
+    for (let y = minYear; y <= maxYear; y++) {
+      const yearRow = document.createElement("div");
+      yearRow.className = "dp-accordion-year" + (y === expandedYear ? " dp-accordion-open" : "");
+
+      const yearBtn = document.createElement("button");
+      yearBtn.type = "button";
+      yearBtn.className = "dp-accordion-year-btn";
+      yearBtn.textContent = y;
+      const chevron = document.createElement("span");
+      chevron.className = "dp-accordion-chevron";
+      chevron.textContent = "›";
+      yearBtn.appendChild(chevron);
+      yearBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        pickerExpandedYear = (pickerExpandedYear === y) ? null : y;
+        rebuildCalendar();
+      });
+      yearRow.appendChild(yearBtn);
+
+      if (y === expandedYear) {
+        const monthGrid = document.createElement("div");
+        monthGrid.className = "dp-month-grid";
+        MONTH_NAMES.forEach((name, m) => {
+          const minMonth = minDate && y === minDate.getFullYear() ? minDate.getMonth() : -1;
+          const maxMonth = maxDate && y === maxDate.getFullYear() ? maxDate.getMonth() : 12;
+          const disabled = m < minMonth || m > maxMonth;
+          const cell = document.createElement("div");
+          cell.className = "dp-month-cell" + (disabled ? " dp-disabled" : "");
+          if (y === pickerYear && m === pickerMonth) cell.classList.add("dp-month-current");
+          cell.textContent = name;
+          if (!disabled) {
+            cell.addEventListener("click", (e) => {
+              e.stopPropagation();
+              pickerYear = y;
+              pickerMonth = m;
+              pickerView = "days";
+              pickerExpandedYear = null;
+              rebuildCalendar();
+            });
+          }
+          monthGrid.appendChild(cell);
+        });
+        yearRow.appendChild(monthGrid);
+      }
+      list.appendChild(yearRow);
+    }
+    wrap.appendChild(list);
+    return wrap;
+  }
+
   function rebuildCalendar() {
     if (!popup) return;
-    const fresh = buildCalendar();
+    const fresh = pickerView === "years" ? buildYearGrid()
+                : pickerView === "year"  ? buildYearAccordion()
+                : buildCalendar();
     popup.replaceChildren(...fresh.childNodes);
+    popup.className = fresh.className;
+    requestAnimationFrame(() => {
+      positionPopup();
+      if (pickerView === "years") {
+        const grid = popup.querySelector(".dp-year-grid");
+        if (grid) grid.scrollTop = grid.scrollHeight;
+      } else if (pickerView === "year") {
+        const openRow = popup.querySelector(".dp-accordion-year.dp-accordion-open");
+        if (openRow) openRow.scrollIntoView({ block: "nearest" });
+      }
+    });
   }
 
   function positionPopup() {
@@ -409,6 +553,8 @@ function makeDatePicker(opts) {
 
   function openPopup() {
     closeAllOverlays();
+    pickerView = "days";
+    pickerExpandedYear = null;
     // Start on month of current selection, or today
     const selIso = opts.getSelected();
     if (selIso) {
@@ -420,7 +566,6 @@ function makeDatePicker(opts) {
     }
     popup = buildCalendar();
     document.body.appendChild(popup);
-    positionPopup();
     requestAnimationFrame(positionPopup);
     window.addEventListener("scroll", positionPopup, true);
     window.addEventListener("resize", positionPopup);
@@ -453,7 +598,7 @@ function makeDatePicker(opts) {
     align: "right",
     anchorEl: btn,
     getSelected: () => "",
-    getMin: () => "",
+    getMin: () => "2012-01-01",
     getMax: () => {
       const yesterday = new Date();
       yesterday.setDate(yesterday.getDate() - 1);
