@@ -1,0 +1,4 @@
+# Exclude all history files except the demo and default placeholder
+history_files/*
+!history_files/demo_history.csv
+!history_files/my_history.csv
