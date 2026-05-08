@@ -886,9 +886,6 @@ body.light-theme .filter-checkbox-item:hover {
 .date-picker-header-label:hover {
   color: #f7931a;
 }
-.dp-year-grid-popup {
-  /* inherits fixed width from .date-picker-popup */
-}
 .dp-year-grid-popup .date-picker-header {
   position: relative;
 }
@@ -1042,7 +1039,7 @@ h2 {
 }
 
 .row-editor.four-col {
-  grid-template-columns: 2fr 72px minmax(160px, 1.2fr) 28px;
+  grid-template-columns: minmax(220px, 2fr) 72px minmax(140px, 1.2fr) 28px;
 }
 
 .row-editor-header {
@@ -1058,7 +1055,7 @@ h2 {
 }
 
 .row-editor-header.four-col {
-  grid-template-columns: 2fr 72px minmax(160px, 1.2fr) 28px;
+  grid-template-columns: minmax(220px, 2fr) 72px minmax(140px, 1.2fr) 28px;
 }
 
 .row-editor-th {
@@ -1228,9 +1225,20 @@ select {
   margin: 0 -14px;
 }
 
+.editor-card .table-wrap table {
+  width: max-content;
+  min-width: 100%;
+}
+
+.editor-card .table-wrap th,
+.editor-card .table-wrap td {
+  white-space: nowrap;
+}
+
 #assetsRows,
 #liabilitiesRows {
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: auto;
   flex: 1 1 auto;
   min-height: 0;
   padding-top: 8px;

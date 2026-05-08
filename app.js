@@ -1074,8 +1074,9 @@ function historyDatesIncludingToday() {
 }
 
 function chartXAtIndex(index, labelCount, x0, chartW) {
-  if (labelCount <= 1) return x0 + chartW / 2;
-  return x0 + (chartW * index) / (labelCount - 1);
+  if (labelCount <= 1) return x0 + (chartW * 0.99) / 2;
+  // Add 1% margin on the right by using 99% of available width
+  return x0 + (chartW * 0.99 * index) / (labelCount - 1);
 }
 
 function nearestHistoryDateForCanvasPoint(canvas, xPx) {
@@ -3479,6 +3480,9 @@ function thinDateTicks(candidates, maxTicks = 8) {
 function buildDateLabelTicks(labels, maxTicks = 8) {
   if (!labels.length) return [];
   const monthShort = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const endpointLabel = (d) => (d.getMonth() === 0 && d.getDate() === 1)
+    ? String(d.getFullYear())
+    : `${d.getMonth() + 1}/${d.getDate()}`;
   const parsed = labels.map((l) => (/^\d{6}$/.test(l) ? parseMMDDYY(l) : null));
   if (parsed.some((d) => !d)) return [];
 
@@ -3532,10 +3536,10 @@ function buildDateLabelTicks(labels, maxTicks = 8) {
     }
   });
   if (!yearCandidates.length || yearCandidates[0].i !== 0) {
-    yearCandidates.unshift({ i: 0, text: String(parsed[0].getFullYear()) });
+    yearCandidates.unshift({ i: 0, text: endpointLabel(parsed[0]) });
   }
   if (yearCandidates[yearCandidates.length - 1].i !== n - 1) {
-    yearCandidates.push({ i: n - 1, text: String(parsed[n - 1].getFullYear()) });
+    yearCandidates.push({ i: n - 1, text: endpointLabel(parsed[n - 1]) });
   }
   return thinDateTicks(yearCandidates, maxTicks);
 }
