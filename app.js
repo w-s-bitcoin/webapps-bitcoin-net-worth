@@ -151,6 +151,10 @@ let isTrackingAction = false;
 let quoteRefreshTimer = null;
 let quoteRefreshAlignTimer = null;
 let quoteRefreshInFlight = false;
+let quoteRefreshAbortController = null;
+let pendingQuoteUiUpdate = false;
+let pendingBackgroundQuoteRefresh = false;
+let editorRowsFocused = false;
 let lastQuoteRefreshAt = null;
 
 if (currentMode === "demo") {
@@ -212,9 +216,51 @@ const el = {
   liveFileList: document.getElementById("liveFileList"),
 };
 
+function syncEditorRowsFocusedFromDom() {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLElement)) {
+    editorRowsFocused = false;
+    return;
+  }
+  // Exclude delete buttons from focus tracking - they're in the rows but shouldn't block renders
+  if (active.classList?.contains("remove-btn")) {
+    editorRowsFocused = false;
+    return;
+  }
+  const wasInAssets = Boolean(el.assetsRows && el.assetsRows.contains(active));
+  const wasInLiabilities = Boolean(el.liabilitiesRows && el.liabilitiesRows.contains(active));
+  editorRowsFocused = wasInAssets || wasInLiabilities;
+}
+
+function initEditorFocusTracking() {
+  const focusIn = () => {
+    editorRowsFocused = true;
+    pauseAutoQuoteRefresh();
+    if (quoteRefreshAbortController) {
+      quoteRefreshAbortController.abort();
+    }
+  };
+  const focusOut = () => {
+    // Let the next activeElement settle (e.g., tabbing to another row field)
+    setTimeout(() => {
+      syncEditorRowsFocusedFromDom();
+      if (!editorRowsFocused) {
+        flushDeferredQuoteUiRefresh();
+        resumeAutoQuoteRefresh();
+      }
+    }, 0);
+  };
+  [el.assetsRows, el.liabilitiesRows].forEach((container) => {
+    if (!container) return;
+    container.addEventListener("focusin", focusIn);
+    container.addEventListener("focusout", focusOut);
+  });
+}
+
 updateModeToggleUI();
 
 applyTheme();
+initEditorFocusTracking();
 
 document.getElementById("refreshQuoteBtn").addEventListener("click", () => {
   void runTrackedAction("quote-refresh", () => refreshQuote());
@@ -1332,9 +1378,7 @@ async function bootstrap() {
 
   renderAll();
   startAutoQuoteRefresh();
-  if (!isManualOverrideActive()) {
-    void refreshQuote({ background: true });
-  }
+  requestBackgroundQuoteRefresh();
   updateModeToggleUI();
 
   if (currentMode === "demo") {
@@ -1437,7 +1481,7 @@ async function bootstrap() {
   renderAll();
 }
 
-function startAutoQuoteRefresh() {
+function clearAutoQuoteRefreshTimers() {
   if (quoteRefreshTimer !== null) {
     clearInterval(quoteRefreshTimer);
     quoteRefreshTimer = null;
@@ -1446,21 +1490,39 @@ function startAutoQuoteRefresh() {
     clearTimeout(quoteRefreshAlignTimer);
     quoteRefreshAlignTimer = null;
   }
+}
+
+function startAutoQuoteRefresh() {
+  clearAutoQuoteRefreshTimers();
 
   const now = Date.now();
   const msUntilNextMinute = QUOTE_AUTO_REFRESH_MS - (now % QUOTE_AUTO_REFRESH_MS);
   const firstDelay = msUntilNextMinute + QUOTE_AUTO_REFRESH_OFFSET_MS;
 
   quoteRefreshAlignTimer = setTimeout(() => {
-    if (!isManualOverrideActive()) {
-      void refreshQuote({ background: true });
-    }
+    requestBackgroundQuoteRefresh();
     quoteRefreshTimer = setInterval(() => {
-      if (!isManualOverrideActive()) {
-        void refreshQuote({ background: true });
-      }
+      requestBackgroundQuoteRefresh();
     }, QUOTE_AUTO_REFRESH_MS);
   }, firstDelay);
+}
+
+function pauseAutoQuoteRefresh() {
+  clearAutoQuoteRefreshTimers();
+}
+
+function resumeAutoQuoteRefresh() {
+  startAutoQuoteRefresh();
+}
+
+function requestBackgroundQuoteRefresh() {
+  if (isManualOverrideActive()) return;
+  if (isAssetLiabilityEditorFocused()) {
+    pendingBackgroundQuoteRefresh = true;
+    return;
+  }
+  pendingBackgroundQuoteRefresh = false;
+  void refreshQuote({ background: true });
 }
 
 function parseFormFromRaw(raw, defaultForm) {
@@ -2240,8 +2302,9 @@ function saveSnapshots() {
 async function refreshQuote({ background = false } = {}) {
   if (quoteRefreshInFlight) return;
   quoteRefreshInFlight = true;
+  quoteRefreshAbortController = new AbortController();
   try {
-    const response = await fetch(KRAKEN_URL, { cache: "no-cache" });
+    const response = await fetch(KRAKEN_URL, { cache: "no-cache", signal: quoteRefreshAbortController.signal });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = await response.json();
     const usdcusd = Number(payload.result.USDCUSD.a[0]);
@@ -2269,12 +2332,61 @@ async function refreshQuote({ background = false } = {}) {
       localStorage.setItem(otherKey, JSON.stringify(otherForm));
     } catch { /* ignore */ }
 
-    renderAll();
+    if (background) {
+      if (isAssetLiabilityEditorFocused()) {
+        pendingQuoteUiUpdate = true;
+      } else {
+        applyBackgroundQuoteUiRefresh();
+      }
+    } else {
+      renderAll();
+    }
   } catch (err) {
-    el.quoteTime.textContent = `Quote refresh failed: ${String(err)}`;
+    if (err && err.name === "AbortError") {
+      // Expected when editor focus starts during an in-flight background refresh.
+    } else {
+      el.quoteTime.textContent = `Quote refresh failed: ${String(err)}`;
+    }
   } finally {
+    quoteRefreshAbortController = null;
     quoteRefreshInFlight = false;
   }
+}
+
+function isAssetLiabilityEditorFocused() {
+  if (editorRowsFocused) return true;
+  syncEditorRowsFocusedFromDom();
+  return editorRowsFocused;
+}
+
+function applyBackgroundQuoteUiRefresh() {
+  const manualActive = isManualOverrideActive();
+  const manualDisplayValue = manualActive
+    ? Number(formState.manualBtcusd)
+    : Number(formState.btcusd || 0);
+  if (document.activeElement !== el.manualBtcusd) {
+    el.manualBtcusd.value = manualDisplayValue > 0 ? formatUsd(manualDisplayValue) : "";
+  }
+  el.quoteTime.textContent = manualActive
+    ? "Manual price override"
+    : (formState.btcusd ? `Updated · ${formatQuoteTimestamp(lastQuoteRefreshAt || new Date())}` : "No quote loaded");
+  updateKPIs();
+  renderHistoryTable();
+  renderChartsOnly();
+}
+
+function flushDeferredQuoteUiRefresh() {
+  if (isAssetLiabilityEditorFocused()) return;
+  if (pendingBackgroundQuoteRefresh) {
+    if (!quoteRefreshInFlight) {
+      pendingBackgroundQuoteRefresh = false;
+      void refreshQuote({ background: true });
+    }
+    return;
+  }
+  if (!pendingQuoteUiUpdate) return;
+  pendingQuoteUiUpdate = false;
+  applyBackgroundQuoteUiRefresh();
 }
 
 function commitManualQuote() {
@@ -2512,13 +2624,19 @@ function saveSnapshot() {
 
 function persistSnapshotForActiveSelection({ render = true, onlyIfDirty = false, trackAction = true, actionLabel = "snapshot-update" } = {}) {
   if (currentMode === "live" && (liveAccessLocked || !liveHistoryFile)) {
-    if (render) renderAll();
+    if (render) {
+      editorRowsFocused = false;
+      renderAll();
+    }
     return;
   }
 
   const applyPersist = () => {
     if (onlyIfDirty && !hasUnsavedAssetLiabilityChanges) {
-      if (render) renderAll();
+      if (render) {
+        editorRowsFocused = false;
+        renderAll();
+      }
       return;
     }
     const targetDate = editingSnapshotDate || mmddyy(new Date());
@@ -2532,7 +2650,10 @@ function persistSnapshotForActiveSelection({ render = true, onlyIfDirty = false,
       snapshots = snapshots.filter((s) => s.date !== targetDate);
       hasUnsavedAssetLiabilityChanges = false;
       saveSnapshots();
-      if (render) renderAll();
+      if (render) {
+        editorRowsFocused = false;
+        renderAll();
+      }
       return;
     }
 
@@ -2546,7 +2667,10 @@ function persistSnapshotForActiveSelection({ render = true, onlyIfDirty = false,
     snapshots.sort((a, b) => parseMMDDYY(a.date) - parseMMDDYY(b.date));
     hasUnsavedAssetLiabilityChanges = false;
     saveSnapshots();
-    if (render) renderAll();
+    if (render) {
+      editorRowsFocused = false;
+      renderAll();
+    }
   };
 
   if (!trackAction) {
@@ -2783,6 +2907,22 @@ function renderEditor(container, key) {
     name.value = row.name;
     name.dataset.rowKey = key;
     name.dataset.rowIndex = String(idx);
+    name.dataset.field = "name";
+    // Direct focus tracking on input element
+    name.addEventListener("focusin", () => {
+      editorRowsFocused = true;
+      pauseAutoQuoteRefresh();
+      if (quoteRefreshAbortController) quoteRefreshAbortController.abort();
+    });
+    name.addEventListener("focusout", () => {
+      setTimeout(() => {
+        syncEditorRowsFocusedFromDom();
+        if (!editorRowsFocused) {
+          flushDeferredQuoteUiRefresh();
+          resumeAutoQuoteRefresh();
+        }
+      }, 0);
+    });
     name.addEventListener("focus", () => captureEditorFieldBaseline(name));
     name.addEventListener("input", () => {
       const wasComplete = isRowComplete(formState[key][idx]);
@@ -2799,6 +2939,11 @@ function renderEditor(container, key) {
       }
     });
     name.addEventListener("blur", (e) => {
+      // Ignore synthetic blur triggered when rerender removes this input from the DOM.
+      if (!e.target.isConnected) {
+        setTimeout(flushDeferredQuoteUiRefresh, 0);
+        return;
+      }
       const before = consumeEditorFieldBaseline(name);
       runTrackedActionFromBefore(`${key}-name-edit`, before, () => {
         hasUnsavedAssetLiabilityChanges = true;
@@ -2806,6 +2951,7 @@ function renderEditor(container, key) {
         const stayingInSameRow = Boolean(next && wrap.contains(next));
         persistSnapshotForActiveSelection({ render: !stayingInSameRow, onlyIfDirty: false, trackAction: false });
       });
+      setTimeout(flushDeferredQuoteUiRefresh, 0);
     });
 
     const amount = document.createElement("input");
@@ -2814,6 +2960,24 @@ function renderEditor(container, key) {
     amount.step = stepForUnit(unitValue);
     amount.placeholder = "amount";
     amount.value = formatAmountInputValue(row.amount, unitValue);
+    amount.dataset.rowKey = key;
+    amount.dataset.rowIndex = String(idx);
+    amount.dataset.field = "amount";
+    // Direct focus tracking on input element
+    amount.addEventListener("focusin", () => {
+      editorRowsFocused = true;
+      pauseAutoQuoteRefresh();
+      if (quoteRefreshAbortController) quoteRefreshAbortController.abort();
+    });
+    amount.addEventListener("focusout", () => {
+      setTimeout(() => {
+        syncEditorRowsFocusedFromDom();
+        if (!editorRowsFocused) {
+          flushDeferredQuoteUiRefresh();
+          resumeAutoQuoteRefresh();
+        }
+      }, 0);
+    });
     amount.addEventListener("focus", () => captureEditorFieldBaseline(amount));
     amount.addEventListener("input", () => {
       const wasComplete = isRowComplete(formState[key][idx]);
@@ -2850,6 +3014,11 @@ function renderEditor(container, key) {
       }
     });
     amount.addEventListener("blur", (e) => {
+      // Ignore synthetic blur triggered when rerender removes this input from the DOM.
+      if (!e.target.isConnected) {
+        setTimeout(flushDeferredQuoteUiRefresh, 0);
+        return;
+      }
       const before = consumeEditorFieldBaseline(amount);
       const cur = formState[key][idx].amount;
       if (cur !== "") {
@@ -2861,6 +3030,7 @@ function renderEditor(container, key) {
         const stayingInSameRow = Boolean(next && wrap.contains(next));
         persistSnapshotForActiveSelection({ render: !stayingInSameRow, onlyIfDirty: false, trackAction: false });
       });
+      setTimeout(flushDeferredQuoteUiRefresh, 0);
     });
 
     let unit = null;
@@ -2877,6 +3047,27 @@ function renderEditor(container, key) {
       optSats.textContent = "sats";
       unit.append(optUsd, optBtc, optSats);
       unit.value = unitValue;
+      unit.dataset.rowKey = key;
+      unit.dataset.rowIndex = String(idx);
+      unit.dataset.field = "unit";
+      // Direct focus tracking on select element
+      unit.addEventListener("focusin", () => {
+        editorRowsFocused = true;
+        pauseAutoQuoteRefresh();
+        if (quoteRefreshAbortController) quoteRefreshAbortController.abort();
+      });
+      unit.addEventListener("focusout", () => {
+        setTimeout(() => {
+          syncEditorRowsFocusedFromDom();
+          if (!editorRowsFocused) {
+            flushDeferredQuoteUiRefresh();
+            resumeAutoQuoteRefresh();
+          }
+        }, 0);
+      });
+      unit.addEventListener("blur", () => {
+        setTimeout(flushDeferredQuoteUiRefresh, 0);
+      });
       unit.addEventListener("change", () => {
         pendingRowFieldFocus = { key, idx, field: "unit" };
         const before = trackedStateSnapshot();
@@ -3047,6 +3238,37 @@ function renderHistoryTable() {
   el.historyCount.textContent = `${snapshots.length} snapshot${snapshots.length === 1 ? "" : "s"}`;
 }
 
+function captureEditorFocusState() {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLInputElement || active instanceof HTMLSelectElement)) return null;
+  const rowKey = active.dataset.rowKey;
+  const rowIndex = active.dataset.rowIndex;
+  const field = active.dataset.field;
+  if (!rowKey || rowIndex === undefined || !field) return null;
+  const state = { rowKey, rowIndex, field };
+  if (active instanceof HTMLInputElement) {
+    state.selectionStart = active.selectionStart;
+    state.selectionEnd = active.selectionEnd;
+  }
+  return state;
+}
+
+function restoreEditorFocusState(state) {
+  if (!state) return;
+  const target = document.querySelector(
+    `[data-row-key="${state.rowKey}"][data-row-index="${state.rowIndex}"][data-field="${state.field}"]`
+  );
+  if (!target || !(target instanceof HTMLElement)) return;
+  target.focus();
+  if (target instanceof HTMLInputElement && Number.isInteger(state.selectionStart) && Number.isInteger(state.selectionEnd)) {
+    try {
+      target.setSelectionRange(state.selectionStart, state.selectionEnd);
+    } catch {
+      // Ignore unsupported input types.
+    }
+  }
+}
+
 function updateKPIs() {
   const today = mmddyy(new Date());
   const isHistorical = editingSnapshotDate && editingSnapshotDate !== today;
@@ -3067,6 +3289,13 @@ function updateKPIs() {
 }
 
 function renderAll() {
+  // GUARD: Never rerender while an editor row field is actively focused
+  // This prevents focus loss and partial saves during user editing
+  if (isAssetLiabilityEditorFocused()) {
+    return;
+  }
+  
+  const editorFocus = captureEditorFocusState();
   const displayDate = formatDisplayDate(editingSnapshotDate);
   const aCount = formState.assets.length;
   const lCount = formState.liabilities.length;
@@ -3110,6 +3339,7 @@ function renderAll() {
   renderHistoryTable();
   populateFilterDropdowns();
   renderChartsOnly();
+  if (editorFocus) restoreEditorFocusState(editorFocus);
 }
 
 function computeTotals(assets, liabilities, btcusd) {
