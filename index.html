@@ -42,7 +42,7 @@
             </div>
             <label id="encryptionToggleWrap" class="encryption-toggle-wrap">
               <input id="liveEncryptionEnabled" type="checkbox" />
-              <span>Encrypt live data</span>
+              <span>Encrypt data</span>
             </label>
           </div>
 
@@ -50,6 +50,12 @@
         <div class="quote-cards">
           <div class="theme-toggle-wrap">
             <div class="history-action-buttons" aria-label="History actions">
+              <button id="lockDataBtn" class="history-action-btn" type="button" title="Lock encrypted data" aria-label="Lock data" disabled>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                  <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                </svg>
+              </button>
               <button id="undoBtn" class="history-action-btn" type="button" title="Undo (Cmd/Ctrl+Z)" aria-label="Undo">
                 <svg viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M8 14 4 10l4-4" />

@@ -54,7 +54,7 @@ body.light-theme {
   --chart-grid: rgba(0, 0, 0, 0.1);
   --chart-axis: rgba(0, 0, 0, 0.28);
   --chart-tick: #666666;
-  --chart-marker: #111111;
+  --chart-marker: #888888;
   --chart-tooltip-bg: rgba(255, 255, 255, 0.96);
   --chart-tooltip-border: rgba(0, 0, 0, 0.12);
   --chart-tooltip-title: #111111;
@@ -63,7 +63,7 @@ body.light-theme {
   --snapshot-highlight-border: rgba(44, 127, 255, 0.42);
   --snapshot-highlight-dot: #2f6dff;
   --snapshot-highlight-ring: rgba(47, 109, 255, 0.2);
-  --networth-usd-line: #5f6670;
+  --networth-usd-line: #9aa3ad;
   --add-btn-color: #000000;
   --danger-border: rgba(200, 30, 30, 0.65);
   --danger-bg: rgba(200, 30, 30, 0.13);
@@ -299,6 +299,11 @@ body.light-theme .live-file-panel {
   display: flex;
 }
 
+.encryption-toggle-wrap.disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
 .encryption-toggle-wrap input[type="checkbox"] {
   width: 15px;
   height: 15px;
@@ -496,8 +501,8 @@ body.light-theme .filter-checkbox-item:hover {
   background: var(--panel);
   border: 1.5px solid var(--border);
   color: var(--text);
-  width: 34px;
-  height: 34px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
   cursor: pointer;
   display: inline-flex;
@@ -508,14 +513,19 @@ body.light-theme .filter-checkbox-item:hover {
 }
 
 .history-action-btn svg {
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   stroke: currentColor;
   fill: none;
   stroke-width: 1.9;
   stroke-linecap: round;
   stroke-linejoin: round;
   transform: translateY(-2px);
+}
+
+#lockDataBtn svg {
+  width: 17px;
+  height: 17px;
 }
 
 .history-action-btn:hover:not(:disabled) {
@@ -1272,4 +1282,70 @@ td.history-actions-cell {
   .summary-row {
     grid-template-columns: 1fr;
   }
+}
+
+/* ── Scrollbar styling ──────────────────────────────────────────────────────
+   Targets the scrollable bottom-panel containers:
+   .table-wrap (history table), #assetsRows/#liabilitiesRows (editor rows),
+   .live-file-panel (file dropdown), and any generic overflow panel.
+   Dark mode is the default; light-theme overrides below. */
+
+.table-wrap,
+#assetsRows,
+#liabilitiesRows,
+.live-file-panel {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+.table-wrap::-webkit-scrollbar,
+#assetsRows::-webkit-scrollbar,
+#liabilitiesRows::-webkit-scrollbar,
+.live-file-panel::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.table-wrap::-webkit-scrollbar-track,
+#assetsRows::-webkit-scrollbar-track,
+#liabilitiesRows::-webkit-scrollbar-track,
+.live-file-panel::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.table-wrap::-webkit-scrollbar-thumb,
+#assetsRows::-webkit-scrollbar-thumb,
+#liabilitiesRows::-webkit-scrollbar-thumb,
+.live-file-panel::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 3px;
+}
+
+.table-wrap::-webkit-scrollbar-thumb:hover,
+#assetsRows::-webkit-scrollbar-thumb:hover,
+#liabilitiesRows::-webkit-scrollbar-thumb:hover,
+.live-file-panel::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.32);
+}
+
+/* Light theme overrides */
+body.light-theme .table-wrap,
+body.light-theme #assetsRows,
+body.light-theme #liabilitiesRows,
+body.light-theme .live-file-panel {
+  scrollbar-color: rgba(0, 0, 0, 0.2) transparent;
+}
+
+body.light-theme .table-wrap::-webkit-scrollbar-thumb,
+body.light-theme #assetsRows::-webkit-scrollbar-thumb,
+body.light-theme #liabilitiesRows::-webkit-scrollbar-thumb,
+body.light-theme .live-file-panel::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+body.light-theme .table-wrap::-webkit-scrollbar-thumb:hover,
+body.light-theme #assetsRows::-webkit-scrollbar-thumb:hover,
+body.light-theme #liabilitiesRows::-webkit-scrollbar-thumb:hover,
+body.light-theme .live-file-panel::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.35);
 }

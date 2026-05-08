@@ -192,6 +192,7 @@ const el = {
   themeLightBtn: document.getElementById("themeLightBtn"),
   undoBtn: document.getElementById("undoBtn"),
   redoBtn: document.getElementById("redoBtn"),
+  lockDataBtn: document.getElementById("lockDataBtn"),
   chartStartDate: document.getElementById("chartStartDate"),
   chartEndDate: document.getElementById("chartEndDate"),
   assetsFilterBtn: document.getElementById("assetsFilterBtn"),
@@ -228,6 +229,9 @@ if (el.undoBtn) {
 }
 if (el.redoBtn) {
   el.redoBtn.addEventListener("click", () => redoLastAction());
+}
+if (el.lockDataBtn) {
+  el.lockDataBtn.addEventListener("click", () => setLiveAccessLocked());
 }
 el.manualBtcusd.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
@@ -1048,11 +1052,13 @@ function populateFilterDropdowns() {
     updateFilterDropdownLabel(el.assetsFilterLabel, el.assetsFilterBtn, assetNames.length, excludedAssets);
     saveFilters(currentMode);
     renderChartsOnly();
+    updateKPIs();
   }, "filter-assets");
   buildFilterPanel(el.liabilitiesFilterPanel, liabilityNames, excludedLiabilities, () => {
     updateFilterDropdownLabel(el.liabilitiesFilterLabel, el.liabilitiesFilterBtn, liabilityNames.length, excludedLiabilities);
     saveFilters(currentMode);
     renderChartsOnly();
+    updateKPIs();
   }, "filter-liabilities");
   updateFilterDropdownLabel(el.assetsFilterLabel, el.assetsFilterBtn, assetNames.length, excludedAssets);
   updateFilterDropdownLabel(el.liabilitiesFilterLabel, el.liabilitiesFilterBtn, liabilityNames.length, excludedLiabilities);
@@ -1370,7 +1376,11 @@ function parseFormFromRaw(raw, defaultForm) {
 // ── Client-side AES-GCM encryption (Web Crypto API) ─────────────────────────
 
 function bytesToBase64(bytes) {
-  return btoa(String.fromCharCode(...bytes));
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
 }
 
 function base64ToBytes(b64) {
@@ -1629,15 +1639,28 @@ async function fetchLiveHistoryFile(filenameOverride = null) {
 }
 
 // Write live history to server. content is a plain CSV or encrypted string.
-async function writeLiveHistoryFile(content, encrypted = false) {
-  if (!serverAvailable) return;
+// Returns true on success. In strict mode, throws on failure.
+async function writeLiveHistoryFile(content, encrypted = false, { strict = false, filename = null } = {}) {
+  const targetFile = filename || liveHistoryFile;
+  if (!serverAvailable) {
+    if (strict) throw new Error("Server unavailable");
+    return false;
+  }
   try {
-    await fetch(LIVE_HISTORY_API, {
+    const res = await fetch(LIVE_HISTORY_API, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file: liveHistoryFile, encrypted, content })
+      body: JSON.stringify({ file: targetFile, encrypted, content })
     });
-  } catch { /* ignore — server may not be running */ }
+    if (!res.ok) {
+      if (strict) throw new Error(`Server rejected write (${res.status})`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    if (strict) throw err;
+    return false;
+  }
 }
 
 // Parse my_history.csv text into snapshots array.
@@ -1668,15 +1691,14 @@ function parseLiveHistoryCsv(text) {
 // Serialize snapshots to CSV string for my_history.csv.
 function snapshotsToCsv(snaps) {
   const sorted = snaps.slice().sort((a, b) => parseMMDDYY(a.date) - parseMMDDYY(b.date));
-  const header = "date,btcusd,assets,liabilities";
+  const header = "date,assets,liabilities";
   const rows = sorted.map((s) => {
     const yyyymmdd = mmddyyToInputValue(s.date).replaceAll("-", "");
-    const btcusd = Number(s.btcusd || 0);
     const assets = JSON.stringify(s.assets || []);
     const liabilities = JSON.stringify(s.liabilities || []);
     // CSV-quote each field that may contain commas or quotes
     const q = (v) => `"${String(v).replaceAll('"', '""')}"`;
-    return `${yyyymmdd},${btcusd},${q(assets)},${q(liabilities)}`;
+    return `${yyyymmdd},${q(assets)},${q(liabilities)}`;
   });
   return [header, ...rows].join("\n");
 }
@@ -2626,6 +2648,7 @@ function renderEditor(container, key) {
       }
       saveForm();
       updateEditorDuplicateWarnings(container, key);
+      updateKPIs();
       if (!wasComplete && isRowComplete(formState[key][idx])) {
         persistSnapshotForActiveSelection({ render: false, onlyIfDirty: true, trackAction: false });
       }
@@ -2658,6 +2681,7 @@ function renderEditor(container, key) {
         hasUnsavedAssetLiabilityChanges = true;
       }
       saveForm();
+      updateKPIs();
       if (!wasComplete && isRowComplete(formState[key][idx])) {
         persistSnapshotForActiveSelection({ render: false, onlyIfDirty: true, trackAction: false });
       }
@@ -2876,6 +2900,25 @@ function renderHistoryTable() {
     el.historyTableBody.appendChild(tr);
   });
   el.historyCount.textContent = `${snapshots.length} snapshot${snapshots.length === 1 ? "" : "s"}`;
+}
+
+function updateKPIs() {
+  const today = mmddyy(new Date());
+  const isHistorical = editingSnapshotDate && editingSnapshotDate !== today;
+  const existingSnap = isHistorical ? snapshots.find((s) => s.date === editingSnapshotDate) : null;
+  const historicalPrice = existingSnap && Number(existingSnap.btcusd) > 0
+    ? Number(existingSnap.btcusd)
+    : (isHistorical && Number(historicalPrices[editingSnapshotDate]) > 0
+        ? Number(historicalPrices[editingSnapshotDate])
+        : null);
+  const displayPrice = historicalPrice !== null ? historicalPrice : activeBtcusd();
+  const snap = applyExclusionFilters(normalizedSnapshot(displayPrice), excludedAssets, excludedLiabilities, displayPrice);
+  el.assetsMetric.textContent = formatBtc(snap.totals.assets_btc);
+  el.assetsMetricUsd.textContent = formatUsd(snap.totals.assets_usd);
+  el.liabilitiesMetric.textContent = formatBtc(snap.totals.liabilities_btc);
+  el.liabilitiesMetricUsd.textContent = formatUsd(snap.totals.liabilities_usd);
+  el.netMetric.textContent = formatBtc(snap.totals.net_btc);
+  el.netMetricUsd.textContent = formatUsd(snap.totals.net_usd);
 }
 
 function renderAll() {
@@ -3222,7 +3265,7 @@ function drawLineChart(canvas, datasets, labels, opts = {}) {
     seenMarker.add(i);
     const x = chartXAtIndex(i, labels.length, x0, chartW);
     ctx.beginPath();
-    ctx.arc(x, y0, 4, 0, Math.PI * 2);
+    ctx.arc(x, y0, 3, 0, Math.PI * 2);
     ctx.fill();
   });
 
@@ -3232,11 +3275,11 @@ function drawLineChart(canvas, datasets, labels, opts = {}) {
     // Large dot at the baseline behind the history marker for the selected date.
     ctx.fillStyle = snapshotHighlightRing;
     ctx.beginPath();
-    ctx.arc(x, y0, 14, 0, Math.PI * 2);
+    ctx.arc(x, y0, 10, 0, Math.PI * 2);
     ctx.fill();
     ctx.fillStyle = snapshotHighlightDot;
     ctx.beginPath();
-    ctx.arc(x, y0, 6, 0, Math.PI * 2);
+    ctx.arc(x, y0, 4, 0, Math.PI * 2);
     ctx.fill();
   }
 
@@ -3562,31 +3605,38 @@ function updateModeToggleUI() {
   document.getElementById("modeDemoBtn").classList.toggle("active", currentMode === "demo");
   document.getElementById("modeLiveBtn").classList.toggle("active", currentMode === "live");
   const isLive = currentMode === "live";
-  // Show encryption toggle only in live mode
+  const isEnc = isLive && liveHistoryFile && liveHistoryFile.endsWith(".enc");
+  if (el.lockDataBtn) {
+    el.lockDataBtn.disabled = !isEnc || liveAccessLocked;
+    el.lockDataBtn.title = isEnc ? "Lock encrypted data" : "Only available when using an encrypted file";
+  }
+  // Always show encryption toggle and file selector; disable in demo mode
   if (el.encryptionToggleWrap) {
-    el.encryptionToggleWrap.classList.toggle("visible", isLive);
+    el.encryptionToggleWrap.classList.add("visible");
+    el.encryptionToggleWrap.classList.toggle("disabled", !isLive);
   }
   if (el.liveEncryptionEnabled) {
-    el.liveEncryptionEnabled.checked = liveEncryptionEnabled;
+    el.liveEncryptionEnabled.checked = isLive ? liveEncryptionEnabled : false;
   }
   const isLiveLocked = isLive && liveAccessLocked;
   if (el.liveEncryptionEnabled) {
-    el.liveEncryptionEnabled.disabled = isLiveLocked;
+    el.liveEncryptionEnabled.disabled = !isLive || isLiveLocked;
   }
-  // Show file selector in live mode; disable interactions if server is unavailable.
+  // Show file selector always; disable interactions in demo mode or when server is unavailable.
   if (el.liveFileWrap) {
-    el.liveFileWrap.classList.toggle("visible", isLive);
+    el.liveFileWrap.classList.add("visible");
     if (el.liveFileBtn) {
-      el.liveFileBtn.disabled = !serverAvailable;
-      el.liveFileBtn.title = serverAvailable ? "Choose history file" : "Start local server to manage history files";
+      el.liveFileBtn.disabled = !isLive || !serverAvailable;
+      el.liveFileBtn.title = !isLive ? "Switch to live mode to manage history files" : serverAvailable ? "Choose history file" : "Start local server to manage history files";
     }
     if (el.liveFileCreateBtn) {
-      el.liveFileCreateBtn.disabled = !serverAvailable || isLiveLocked;
+      el.liveFileCreateBtn.disabled = !isLive || !serverAvailable || isLiveLocked;
     }
     if (isLive) {
       void populateLiveFileMenu();
     } else {
       closeLiveFileDropdown();
+      if (el.liveFileValue) el.liveFileValue.textContent = "demo_history.csv";
     }
   }
 
@@ -3640,19 +3690,56 @@ async function enableLiveEncryption() {
   const encFilename = liveHistoryFile.replace(/\.(csv|enc)$/, "") + ".enc";
   const pw = await promptForPassword({ confirm: true, message: `Set a password for ${encFilename}.` });
   if (!pw) { el.liveEncryptionEnabled.checked = false; return; }
+  if (!serverAvailable) {
+    el.liveEncryptionEnabled.checked = false;
+    alert("Cannot enable encryption: server is not available.\nStart the local server and try again.");
+    return;
+  }
+
+  let enc = "";
+  try {
+    // Encrypt current snapshots first.
+    const csv = snapshotsToCsv(snapshots);
+    enc = await encryptText(csv, pw);
+
+    // Transactional server write: require successful write and verify the file exists.
+    await writeLiveHistoryFile(enc, true, { strict: true, filename: encFilename });
+    const verifyRaw = await fetchLiveHistoryFile(encFilename);
+    if (verifyRaw === null) {
+      throw new Error("Encrypted file verification failed: file not readable after write");
+    }
+  } catch (err) {
+    // Roll back UI toggle on any failure so visible state matches storage/server state.
+    el.liveEncryptionEnabled.checked = false;
+    liveEncryptionEnabled = false;
+    liveEncryptionPassword = null;
+    try { localStorage.setItem(LIVE_ENCRYPTION_ENABLED_KEY, "0"); } catch { /* ignore */ }
+    const reason = (err && err.message) ? err.message : String(err);
+    console.error("enableLiveEncryption failed:", err);
+    alert(`Could not enable encryption: ${reason}`);
+    await populateLiveFileMenu();
+    updateModeToggleUI();
+    return;
+  }
+
+  // Commit app state after server conversion succeeds.
   liveEncryptionPassword = pw;
   liveEncryptionEnabled = true;
   liveHistoryFile = encFilename;
   liveFilePasswords.set(liveHistoryFile, liveEncryptionPassword);
-  localStorage.setItem(LIVE_ENCRYPTION_ENABLED_KEY, "1");
-  localStorage.setItem(LIVE_HISTORY_FILE_KEY, liveHistoryFile);
-  // Encrypt and write the file; remove plaintext copies
-  const csv = snapshotsToCsv(snapshots);
-  const enc = await encryptText(csv, liveEncryptionPassword);
-  localStorage.setItem(STORE_KEY_LIVE_ENC, enc);
-  localStorage.removeItem(STORE_KEY_LIVE);
-  localStorage.removeItem(FORM_KEY_LIVE);
-  await writeLiveHistoryFile(enc, true);
+
+  // Persisting local cache is best-effort. If storage quota is full, keep server state as source
+  // of truth instead of showing a false conversion failure.
+  try {
+    localStorage.setItem(LIVE_ENCRYPTION_ENABLED_KEY, "1");
+    localStorage.setItem(LIVE_HISTORY_FILE_KEY, liveHistoryFile);
+    localStorage.setItem(STORE_KEY_LIVE_ENC, enc);
+    localStorage.removeItem(STORE_KEY_LIVE);
+    localStorage.removeItem(FORM_KEY_LIVE);
+  } catch {
+    console.warn("Live encryption enabled, but local encrypted cache could not be persisted.");
+  }
+
   await populateLiveFileMenu();
   updateModeToggleUI();
 }
