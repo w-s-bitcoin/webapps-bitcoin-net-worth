@@ -1,0 +1,3886 @@
+const KRAKEN_URL = "https://api.kraken.com/0/public/Ticker?pair=USDCUSD,XBTUSDC";
+const HIST_PRICE_URL = "https://raw.githubusercontent.com/w-s-bitcoin/wickedsmartbitcoin/main/assets/daily_price.csv";
+const LIVE_HISTORY_API = "/api/live-history";
+const STORE_KEY_DEMO = "bitcoinNetWorthTrackerSnapshotsDemoV1";
+const STORE_KEY_LIVE = "bitcoinNetWorthTrackerSnapshotsLiveV1";
+const FORM_KEY_DEMO = "bitcoinNetWorthTrackerFormDemoV1";
+const FORM_KEY_LIVE = "bitcoinNetWorthTrackerFormLiveV1";
+const STORE_KEY_LIVE_ENC = "bitcoinNetWorthTrackerSnapshotsLiveEncV1";
+const FORM_KEY_LIVE_ENC = "bitcoinNetWorthTrackerFormLiveEncV1";
+const LIVE_ENCRYPTION_ENABLED_KEY = "bitcoinNetWorthTrackerLiveEncryptionEnabledV1";
+const LIVE_HISTORY_FILE_KEY = "bitcoinNetWorthTrackerLiveFileV1";
+const MODE_KEY = "bitcoinNetWorthTrackerModeV1";
+const THEME_KEY = "bitcoinNetWorthTrackerThemeV1";
+const BTCUSD_CACHE_KEY = "bitcoinNetWorthTrackerBtcusdCacheV1";
+const FILTER_KEY_DEMO = "bitcoinNetWorthTrackerFiltersDemoV1";
+const FILTER_KEY_LIVE = "bitcoinNetWorthTrackerFiltersLiveV1";
+const QUOTE_AUTO_REFRESH_MS = 60_000;
+const QUOTE_AUTO_REFRESH_OFFSET_MS = 1_000;
+const SERVER_HEARTBEAT_API = "/api/heartbeat";
+const SERVER_HEARTBEAT_MS = 20_000;
+
+let serverAvailable = false; // set to true after first successful server probe
+
+// Returns a fresh default formState for the given mode, seeded with the last
+// known BTC price so the exchange rate is never lost across resets.
+function freshFormState(mode) {
+  const base = mode === "demo"
+    ? structuredClone(DEFAULT_FORM_DEMO)
+    : structuredClone(DEFAULT_FORM_LIVE);
+  if (!base.btcusd || base.btcusd === 0) {
+    const cached = Number(localStorage.getItem(BTCUSD_CACHE_KEY) || 0);
+    if (cached > 0) base.btcusd = cached;
+  }
+  return base;
+}
+
+// Migrate any existing data from the old single keys into mode-specific keys.
+// Old data was always demo (demo was the only mode), so migrate into demo keys.
+(function migrateOldStore() {
+  const OLD_STORE = "bitcoinNetWorthTrackerSnapshotsV1";
+  const OLD_FORM  = "bitcoinNetWorthTrackerFormV1";
+  const oldSnap = localStorage.getItem(OLD_STORE);
+  if (oldSnap && !localStorage.getItem(STORE_KEY_DEMO)) {
+    localStorage.setItem(STORE_KEY_DEMO, oldSnap);
+    localStorage.removeItem(OLD_STORE);
+  }
+  const oldForm = localStorage.getItem(OLD_FORM);
+  if (oldForm && !localStorage.getItem(FORM_KEY_DEMO)) {
+    localStorage.setItem(FORM_KEY_DEMO, oldForm);
+    localStorage.removeItem(OLD_FORM);
+  }
+  // One-time fix: earlier migration incorrectly copied demo data into the live
+  // store. Clear it so live starts clean. Guard with a flag so we only do this once.
+  const FIX_KEY = "bitcoinNetWorthTrackerLiveMigrationFixV1";
+  if (!localStorage.getItem(FIX_KEY)) {
+    localStorage.removeItem(STORE_KEY_LIVE);
+    localStorage.removeItem(FORM_KEY_LIVE);
+    localStorage.setItem(FIX_KEY, "1");
+  }
+})();
+
+let currentMode = localStorage.getItem(MODE_KEY) || "demo";
+
+const DEFAULT_FORM_DEMO = {
+  btcusd: 0,
+  manualBtcusd: null,
+  useManualBtcusd: false,
+  assets: [
+    { name: "bitcoin", amount: 1, unit: "BTC" },
+    { name: "cash", amount: 1000, unit: "USD" },
+    { name: "stocks", amount: 2000, unit: "USD" },
+    { name: "car_value", amount: 5000, unit: "USD" },
+    { name: "home_value", amount: 250000, unit: "USD" }
+  ],
+  liabilities: [
+    { name: "credit_card_debt", amount: 2500, unit: "USD" },
+    { name: "student_loans", amount: 10000, unit: "USD" },
+    { name: "car_loans", amount: 4000, unit: "USD" },
+    { name: "mortgage", amount: 220000, unit: "USD" }
+  ]
+};
+
+const DEFAULT_FORM_LIVE = {
+  btcusd: 0,
+  manualBtcusd: null,
+  useManualBtcusd: false,
+  assets: [],
+  liabilities: []
+};
+
+const COLORS = [
+  "#f7931a", "#2bb5ff", "#39d7a4", "#ef6f6c", "#ffd166",
+  "#b48cf0", "#86efac", "#f9a8d4", "#67e8f9", "#fca5a5"
+];
+const CHART_PAD = { l: 130, r: 22, t: 34, b: 64 };
+let currentTheme = localStorage.getItem(THEME_KEY) || "dark";
+
+let formState = loadForm();
+let snapshots = loadSnapshots();
+let pendingRowFocus = null;
+let pendingRowFieldFocus = null;
+let manualEditedThisSession = false;
+let historicalPrices = {}; // MMDDYY -> USD price, loaded from remote CSV on init
+let editingSnapshotDate = mmddyy(new Date());
+let hasUnsavedAssetLiabilityChanges = false;
+let hoveredSnapshotDate = null;
+let hoveredCanvasY = null;
+let liveEncryptionEnabled = localStorage.getItem(LIVE_ENCRYPTION_ENABLED_KEY) === "1";
+let liveEncryptionPassword = null; // session-only, never persisted
+let liveHistoryFile = localStorage.getItem(LIVE_HISTORY_FILE_KEY) || (liveEncryptionEnabled ? "my_history.enc" : "my_history.csv");
+let liveAccessLocked = false;
+const liveFilePasswords = new Map(); // filename -> password (session-only)
+let chartRange = { startDate: null, endDate: null };
+let excludedAssets = new Set();
+let excludedLiabilities = new Set();
+
+function filterKeyForMode(mode) {
+  return mode === "live" ? FILTER_KEY_LIVE : FILTER_KEY_DEMO;
+}
+
+function saveFilters(mode) {
+  const payload = {
+    excludedAssets: Array.from(excludedAssets),
+    excludedLiabilities: Array.from(excludedLiabilities)
+  };
+  localStorage.setItem(filterKeyForMode(mode), JSON.stringify(payload));
+}
+
+function loadFilters(mode) {
+  try {
+    const raw = localStorage.getItem(filterKeyForMode(mode));
+    if (!raw) return;
+    const { excludedAssets: ea = [], excludedLiabilities: el = [] } = JSON.parse(raw);
+    excludedAssets = new Set(ea);
+    excludedLiabilities = new Set(el);
+  } catch {
+    excludedAssets = new Set();
+    excludedLiabilities = new Set();
+  }
+}
+const chartInteractionState = {
+  alChart: { labels: [], markerDates: [] },
+  netChart: { labels: [], markerDates: [] }
+};
+const MAX_ACTION_HISTORY = 200;
+let undoStack = [];
+let redoStack = [];
+let actionLog = [];
+let isApplyingHistory = false;
+let isTrackingAction = false;
+let quoteRefreshTimer = null;
+let quoteRefreshAlignTimer = null;
+let quoteRefreshInFlight = false;
+let lastQuoteRefreshAt = null;
+
+if (currentMode === "demo") {
+  resetDemoState();
+  formState = freshFormState("demo");
+  snapshots = [];
+  editingSnapshotDate = mmddyy(new Date());
+}
+
+// Always start on the real price source; manual field will be populated from real price after first fetch.
+formState.useManualBtcusd = false;
+formState.manualBtcusd = null;
+editingSnapshotDate = mmddyy(new Date());
+seedTodayFormStateFromHistory({ save: false });
+loadFilters(currentMode);
+
+const el = {
+  realPriceCard: document.getElementById("realPriceCard"),
+  quoteTime: document.getElementById("quoteTime"),
+  manualBtcusd: document.getElementById("manualBtcusd"),
+  assetsPanelTitle: document.getElementById("assetsPanelTitle"),
+  assetsCount: document.getElementById("assetsCount"),
+  assetsRows: document.getElementById("assetsRows"),
+  liabilitiesPanelTitle: document.getElementById("liabilitiesPanelTitle"),
+  liabilitiesCount: document.getElementById("liabilitiesCount"),
+  liabilitiesRows: document.getElementById("liabilitiesRows"),
+  assetsMetric: document.getElementById("assetsMetric"),
+  assetsMetricUsd: document.getElementById("assetsMetricUsd"),
+  liabilitiesMetric: document.getElementById("liabilitiesMetric"),
+  liabilitiesMetricUsd: document.getElementById("liabilitiesMetricUsd"),
+  netMetric: document.getElementById("netMetric"),
+  netMetricUsd: document.getElementById("netMetricUsd"),
+  historyCount: document.getElementById("historyCount"),
+  historyTableBody: document.getElementById("historyTableBody"),
+  alChart: document.getElementById("alChart"),
+  netChart: document.getElementById("netChart"),
+  themeToggle: document.getElementById("themeToggle"),
+  themeDarkBtn: document.getElementById("themeDarkBtn"),
+  themeLightBtn: document.getElementById("themeLightBtn"),
+  undoBtn: document.getElementById("undoBtn"),
+  redoBtn: document.getElementById("redoBtn"),
+  chartStartDate: document.getElementById("chartStartDate"),
+  chartEndDate: document.getElementById("chartEndDate"),
+  assetsFilterBtn: document.getElementById("assetsFilterBtn"),
+  assetsFilterLabel: document.getElementById("assetsFilterLabel"),
+  assetsFilterPanel: document.getElementById("assetsFilterPanel"),
+  liabilitiesFilterBtn: document.getElementById("liabilitiesFilterBtn"),
+  liabilitiesFilterLabel: document.getElementById("liabilitiesFilterLabel"),
+  liabilitiesFilterPanel: document.getElementById("liabilitiesFilterPanel"),
+  liveEncryptionEnabled: document.getElementById("liveEncryptionEnabled"),
+  encryptionToggleWrap: document.getElementById("encryptionToggleWrap"),
+  liveFileWrap: document.getElementById("liveFileWrap"),
+  liveFileDropdown: document.getElementById("liveFileDropdown"),
+  liveFileBtn: document.getElementById("liveFileBtn"),
+  liveFileValue: document.getElementById("liveFileValue"),
+  liveFilePanel: document.getElementById("liveFilePanel"),
+  liveFileCreateBtn: document.getElementById("liveFileCreateBtn"),
+  liveFileList: document.getElementById("liveFileList"),
+};
+
+updateModeToggleUI();
+
+applyTheme();
+
+document.getElementById("refreshQuoteBtn").addEventListener("click", () => {
+  void runTrackedAction("quote-refresh", () => refreshQuote());
+});
+el.themeToggle.addEventListener("click", () => {
+  runTrackedAction("theme-toggle", () => {
+    setTheme(currentTheme === "dark" ? "light" : "dark");
+  });
+});
+if (el.undoBtn) {
+  el.undoBtn.addEventListener("click", () => undoLastAction());
+}
+if (el.redoBtn) {
+  el.redoBtn.addEventListener("click", () => redoLastAction());
+}
+el.manualBtcusd.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    commitManualQuote();
+    el.manualBtcusd.blur();
+  }
+});
+el.manualBtcusd.addEventListener("focus", () => {
+  captureEditorFieldBaseline(el.manualBtcusd);
+  const num = Number(el.manualBtcusd.value.replace(/[$,]/g, "").trim());
+  el.manualBtcusd.value = Number.isFinite(num) && num > 0 ? String(num) : "";
+  el.manualBtcusd.select();
+});
+el.manualBtcusd.addEventListener("blur", commitManualQuote);
+document.getElementById("modeDemoBtn").addEventListener("click", () => { void switchMode(currentMode === "demo" ? "live" : "demo"); });
+document.getElementById("modeLiveBtn").addEventListener("click", () => { void switchMode(currentMode === "live" ? "demo" : "live"); });
+el.liveEncryptionEnabled.addEventListener("change", () => {
+  if (el.liveEncryptionEnabled.checked) {
+    void enableLiveEncryption();
+  } else {
+    void disableLiveEncryption();
+  }
+});
+el.liveFileBtn.addEventListener("click", () => {
+  const isOpen = el.liveFilePanel && !el.liveFilePanel.hidden;
+  closeAllOverlays();
+  if (!isOpen && el.liveFilePanel && el.liveFileDropdown) {
+    el.liveFilePanel.hidden = false;
+    el.liveFileDropdown.classList.add("open");
+    el.liveFileBtn.setAttribute("aria-expanded", "true");
+  }
+});
+el.liveFileCreateBtn.addEventListener("click", async () => {
+  if (!serverAvailable) {
+    closeLiveFileDropdown();
+    alert("History file server is unavailable. Start the local server to create/open files.");
+    return;
+  }
+  closeLiveFileDropdown();
+  const existingFiles = await fetchAvailableLiveFiles();
+  const rawName = await promptForFilename({ existingFiles });
+  if (!rawName) return;
+  await createLiveFile(rawName);
+  await populateLiveFileMenu();
+});
+document.querySelectorAll(".add-row-btn").forEach((btn) => {
+  if (btn.dataset.target) btn.addEventListener("click", () => addRow(btn.dataset.target));
+});
+
+// ── Global overlay registry (one open at a time) ────────────────────────────
+const _overlayClosers = new Set();
+function closeAllOverlays() {
+  _overlayClosers.forEach((fn) => fn());
+  closeAllFilterDropdowns();
+  closeLiveFileDropdown();
+}
+
+// ── Reusable custom date picker ───────────────────────────────────────────────
+// opts.anchorEl   – element to position below
+// opts.getSelected – () => "YYYY-MM-DD" or ""   (currently selected value)
+// opts.getMin      – () => "YYYY-MM-DD" or ""   (earliest selectable, inclusive)
+// opts.getMax      – () => "YYYY-MM-DD" or ""   (latest selectable, inclusive)
+// opts.isDisabled  – (isoVal) => bool            (extra per-day disabled check)
+// opts.onSelect    – (isoVal) => void
+function makeDatePicker(opts) {
+  let popup = null;
+  let pickerYear, pickerMonth;
+  const align = opts.align === "left" ? "left" : "right";
+
+  function isoToDate(iso) {
+    if (!iso) return null;
+    const [y, m, d] = iso.split("-").map(Number);
+    const dt = new Date(y, m - 1, d);
+    dt.setHours(0, 0, 0, 0);
+    return dt;
+  }
+
+  function buildCalendar() {
+    const selectedIso = opts.getSelected();
+    const minDate = isoToDate(opts.getMin());
+    const maxDate = isoToDate(opts.getMax());
+
+    const year = pickerYear;
+    const month = pickerMonth;
+    const monthLabel = new Date(year, month, 1).toLocaleString("default", { month: "long", year: "numeric" });
+
+    const wrap = document.createElement("div");
+    wrap.className = "date-picker-popup";
+
+    // Header
+    const header = document.createElement("div");
+    header.className = "date-picker-header";
+    const prev = document.createElement("button");
+    prev.className = "date-picker-nav";
+    prev.textContent = "‹";
+    prev.type = "button";
+    prev.addEventListener("click", (e) => { e.stopPropagation(); pickerMonth--; if (pickerMonth < 0) { pickerMonth = 11; pickerYear--; } rebuildCalendar(); });
+    const next = document.createElement("button");
+    next.className = "date-picker-nav";
+    next.textContent = "›";
+    next.type = "button";
+    next.addEventListener("click", (e) => { e.stopPropagation(); pickerMonth++; if (pickerMonth > 11) { pickerMonth = 0; pickerYear++; } rebuildCalendar(); });
+    const lbl = document.createElement("span");
+    lbl.textContent = monthLabel;
+    header.append(prev, lbl, next);
+    wrap.appendChild(header);
+
+    // Day-of-week row
+    const grid = document.createElement("div");
+    grid.className = "date-picker-grid";
+    ["Su","Mo","Tu","We","Th","Fr","Sa"].forEach((d) => {
+      const dow = document.createElement("div");
+      dow.className = "date-picker-dow";
+      dow.textContent = d;
+      grid.appendChild(dow);
+    });
+
+    // Blank cells
+    const firstDay = new Date(year, month, 1).getDay();
+    for (let i = 0; i < firstDay; i++) {
+      const blank = document.createElement("div");
+      blank.className = "date-picker-day dp-empty";
+      grid.appendChild(blank);
+    }
+
+    // Day cells
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    for (let d = 1; d <= daysInMonth; d++) {
+      const date = new Date(year, month, d);
+      date.setHours(0, 0, 0, 0);
+      const isoVal = `${year}-${String(month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+      const isSelected = isoVal === selectedIso;
+      const outOfRange = (minDate && date < minDate) || (maxDate && date > maxDate);
+      const extraDisabled = opts.isDisabled ? opts.isDisabled(isoVal) : false;
+
+      const cell = document.createElement("div");
+      cell.className = "date-picker-day";
+      cell.textContent = d;
+
+      if (isSelected) {
+        cell.classList.add("dp-selected");
+      }
+
+      if (outOfRange || extraDisabled) {
+        cell.classList.add("dp-disabled");
+      } else {
+        cell.addEventListener("click", (e) => {
+          e.stopPropagation();
+          closePopup();
+          opts.onSelect(isoVal);
+        });
+      }
+      grid.appendChild(cell);
+    }
+    wrap.appendChild(grid);
+    return wrap;
+  }
+
+  function rebuildCalendar() {
+    if (!popup) return;
+    const fresh = buildCalendar();
+    popup.replaceChildren(...fresh.childNodes);
+  }
+
+  function positionPopup() {
+    if (!popup) return;
+    const rect = opts.anchorEl.getBoundingClientRect();
+    popup.style.top = `${rect.bottom + 6}px`;
+    const idealLeft = align === "left" ? rect.left : (rect.right - popup.offsetWidth);
+    const maxLeft = Math.max(4, window.innerWidth - popup.offsetWidth - 4);
+    const left = Math.min(Math.max(4, idealLeft), maxLeft);
+    popup.style.left = `${left}px`;
+  }
+
+  function openPopup() {
+    closeAllOverlays();
+    // Start on month of current selection, or today
+    const selIso = opts.getSelected();
+    if (selIso) {
+      const [y, m] = selIso.split("-").map(Number);
+      pickerYear = y; pickerMonth = m - 1;
+    } else {
+      const now = new Date();
+      pickerYear = now.getFullYear(); pickerMonth = now.getMonth();
+    }
+    popup = buildCalendar();
+    document.body.appendChild(popup);
+    positionPopup();
+    requestAnimationFrame(positionPopup);
+    window.addEventListener("scroll", positionPopup, true);
+    window.addEventListener("resize", positionPopup);
+  }
+
+  function closePopup() {
+    if (popup) {
+      popup.remove();
+      popup = null;
+      window.removeEventListener("scroll", positionPopup, true);
+      window.removeEventListener("resize", positionPopup);
+    }
+  }
+
+  function toggle(e) {
+    e.stopPropagation();
+    if (popup) { closePopup(); } else { openPopup(); }
+  }
+
+  document.addEventListener("click", closePopup);
+
+  _overlayClosers.add(closePopup);
+  return { toggle, closePopup, rebuildCalendar };
+}
+
+// ── History panel date picker ─────────────────────────────────────────────────
+(function initHistoryDatePicker() {
+  const btn = document.getElementById("addHistoryDateBtn");
+  const picker = makeDatePicker({
+    align: "right",
+    anchorEl: btn,
+    getSelected: () => "",
+    getMin: () => "",
+    getMax: () => {
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const y = yesterday.getFullYear();
+      const m = String(yesterday.getMonth() + 1).padStart(2, "0");
+      const d = String(yesterday.getDate()).padStart(2, "0");
+      return `${y}-${m}-${d}`;
+    },
+    isDisabled: (isoVal) => snapshots.some((s) => mmddyyToInputValue(s.date) === isoVal),
+    onSelect: (isoVal) => addSnapshotForDate(inputValueToMMDDYY(isoVal))
+  });
+  btn.addEventListener("click", picker.toggle);
+})();
+
+// ── Chart date range pickers ──────────────────────────────────────────────────
+(function initChartDatePickers() {
+  const startBtn = document.getElementById("chartStartDateBtn");
+  const endBtn   = document.getElementById("chartEndDateBtn");
+
+  function fmtLabel(isoVal) {
+    if (!isoVal) return "—";
+    const [y, m, d] = isoVal.split("-");
+    return `${m}/${d}/${y.slice(2)}`;
+  }
+
+  function refreshBtnLabels() {
+    startBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>${fmtLabel(el.chartStartDate.value)}`;
+    endBtn.innerHTML   = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>${fmtLabel(el.chartEndDate.value)}`;
+  }
+
+  // Patch syncChartRange side-effects so buttons update too
+  const _origRenderChartsOnly = renderChartsOnly;
+  window._chartDatePickersRefresh = refreshBtnLabels;
+
+  const startPicker = makeDatePicker({
+    align: "left",
+    anchorEl: startBtn,
+    getSelected: () => el.chartStartDate.value,
+    getMin: () => el.chartStartDate.min || "",
+    getMax: () => el.chartStartDate.max || "",
+    isDisabled: () => false,
+    onSelect: (isoVal) => {
+      el.chartStartDate.value = isoVal;
+      updateChartDateRangeFromInputs("start");
+      refreshBtnLabels();
+      endPicker.rebuildCalendar();
+    }
+  });
+
+  const endPicker = makeDatePicker({
+    align: "left",
+    anchorEl: endBtn,
+    getSelected: () => el.chartEndDate.value,
+    getMin: () => el.chartEndDate.min || "",
+    getMax: () => el.chartEndDate.max || "",
+    isDisabled: () => false,
+    onSelect: (isoVal) => {
+      el.chartEndDate.value = isoVal;
+      updateChartDateRangeFromInputs("end");
+      refreshBtnLabels();
+      startPicker.rebuildCalendar();
+    }
+  });
+
+  startBtn.addEventListener("click", startPicker.toggle);
+  endBtn.addEventListener("click", endPicker.toggle);
+
+  // Expose so renderChartsOnly can keep labels fresh
+  window._chartDatePickersRefresh = refreshBtnLabels;
+})();
+
+
+document.getElementById("assetsFilterDropdown").addEventListener("click", (e) => {
+  if (e.target.closest(".filter-dropdown-panel")) return;
+  if (document.getElementById("assetsFilterBtn")?.disabled) return;
+  toggleFilterDropdown("assets");
+});
+document.getElementById("liabilitiesFilterDropdown").addEventListener("click", (e) => {
+  if (e.target.closest(".filter-dropdown-panel")) return;
+  if (document.getElementById("liabilitiesFilterBtn")?.disabled) return;
+  toggleFilterDropdown("liabilities");
+});
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".filter-dropdown")) closeAllFilterDropdowns();
+  if (!e.target.closest(".live-file-dropdown")) closeLiveFileDropdown();
+});
+document.addEventListener("keydown", handleUndoRedoHotkeys);
+attachChartInteractions();
+updateUndoRedoButtons();
+
+// Resize canvas buffers to match display pixels so fonts don't squish at narrow widths.
+(function attachChartResizeObserver() {
+  let pending = false;
+  function syncCanvasSizes() {
+    let changed = false;
+    [el.alChart, el.netChart].forEach((canvas) => {
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      const w = Math.round(rect.width * dpr);
+      const h = Math.round(rect.height * dpr);
+      if (w > 0 && h > 0 && (canvas.width !== w || canvas.height !== h)) {
+        canvas.width = w;
+        canvas.height = h;
+        changed = true;
+      }
+    });
+    if (changed) renderChartsOnly();
+    pending = false;
+  }
+  const ro = new ResizeObserver(() => {
+    if (!pending) {
+      pending = true;
+      requestAnimationFrame(syncCanvasSizes);
+    }
+  });
+  [el.alChart, el.netChart].forEach((c) => ro.observe(c));
+  // Initial sync on first frame
+  requestAnimationFrame(syncCanvasSizes);
+}());
+
+startServerHeartbeat();
+void bootstrap();
+
+function mmddyy(date = new Date()) {
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  const yy = String(date.getFullYear()).slice(-2);
+  return `${mm}${dd}${yy}`;
+}
+
+function parseMMDDYY(tag) {
+  const mm = Number(tag.slice(0, 2));
+  const dd = Number(tag.slice(2, 4));
+  const yy = Number(tag.slice(4, 6));
+  return new Date(2000 + yy, mm - 1, dd);
+}
+
+function formatDisplayDate(tag) {
+  const d = parseMMDDYY(tag);
+  return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
+}
+
+function formatQuoteTimestamp(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString("en-US", {
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true
+  });
+}
+
+function themeValue(name) {
+  return getComputedStyle(document.body).getPropertyValue(name).trim();
+}
+
+function startServerHeartbeat() {
+  let timer = null;
+  const sendHeartbeat = () => {
+    fetch(SERVER_HEARTBEAT_API, {
+      method: "POST",
+      keepalive: true,
+      cache: "no-store"
+    }).catch(() => {
+      // Ignore heartbeat failures; server might be unavailable during startup.
+    });
+  };
+
+  sendHeartbeat();
+  timer = window.setInterval(sendHeartbeat, SERVER_HEARTBEAT_MS);
+
+  window.addEventListener("pagehide", () => {
+    if (timer) window.clearInterval(timer);
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon(SERVER_HEARTBEAT_API, "bye");
+    }
+  }, { once: true });
+}
+
+function applyTheme() {
+  document.body.classList.toggle("light-theme", currentTheme === "light");
+  if (el.themeDarkBtn && el.themeLightBtn) {
+    el.themeDarkBtn.classList.toggle("active", currentTheme === "dark");
+    el.themeLightBtn.classList.toggle("active", currentTheme === "light");
+  }
+}
+
+function setTheme(nextTheme) {
+  if (nextTheme === currentTheme) return;
+  currentTheme = nextTheme;
+  localStorage.setItem(THEME_KEY, currentTheme);
+  applyTheme();
+  renderAll();
+}
+
+function trackedStateSnapshot() {
+  return {
+    formState: structuredClone(formState),
+    snapshots: structuredClone(snapshots),
+    chartRange: structuredClone(chartRange),
+    excludedAssets: Array.from(excludedAssets).sort(),
+    excludedLiabilities: Array.from(excludedLiabilities).sort(),
+    currentTheme,
+    editingSnapshotDate,
+    hasUnsavedAssetLiabilityChanges
+  };
+}
+
+function trackedStateEquals(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function recordActionEntry(action, before, after) {
+  undoStack.push({ action, before, after });
+  if (undoStack.length > MAX_ACTION_HISTORY) undoStack.shift();
+  redoStack = [];
+  actionLog.push({ action, at: new Date().toISOString(), direction: "forward" });
+  if (actionLog.length > MAX_ACTION_HISTORY * 4) actionLog.shift();
+  updateUndoRedoButtons();
+}
+
+function restoreTrackedState(state) {
+  formState = structuredClone(state.formState);
+  snapshots = structuredClone(state.snapshots);
+  chartRange = structuredClone(state.chartRange || { startDate: null, endDate: null });
+  excludedAssets = new Set(state.excludedAssets || []);
+  excludedLiabilities = new Set(state.excludedLiabilities || []);
+  if (state.currentTheme && state.currentTheme !== currentTheme) {
+    currentTheme = state.currentTheme;
+    localStorage.setItem(THEME_KEY, currentTheme);
+    applyTheme();
+  }
+  editingSnapshotDate = state.editingSnapshotDate;
+  hasUnsavedAssetLiabilityChanges = Boolean(state.hasUnsavedAssetLiabilityChanges);
+  saveForm();
+  saveSnapshots();
+  saveFilters(currentMode);
+  renderAll();
+}
+
+function runTrackedAction(action, fn) {
+  if (isApplyingHistory || isTrackingAction) return fn();
+  isTrackingAction = true;
+  const before = trackedStateSnapshot();
+  try {
+    const result = fn();
+    const finalize = () => {
+      const after = trackedStateSnapshot();
+      if (!trackedStateEquals(before, after)) {
+        recordActionEntry(action, before, after);
+      }
+      isTrackingAction = false;
+    };
+    if (result && typeof result.then === "function") {
+      return result.finally(finalize);
+    }
+    finalize();
+    return result;
+  } catch (e) {
+    isTrackingAction = false;
+    throw e;
+  }
+}
+
+function runTrackedActionFromBefore(action, before, fn) {
+  if (isApplyingHistory || isTrackingAction) return fn();
+  isTrackingAction = true;
+  try {
+    const result = fn();
+    const finalize = () => {
+      const after = trackedStateSnapshot();
+      if (!trackedStateEquals(before, after)) {
+        recordActionEntry(action, before, after);
+      }
+      isTrackingAction = false;
+    };
+    if (result && typeof result.then === "function") {
+      return result.finally(finalize);
+    }
+    finalize();
+    return result;
+  } catch (e) {
+    isTrackingAction = false;
+    throw e;
+  }
+}
+
+function captureEditorFieldBaseline(el) {
+  if (!el._trackedBeforeState) {
+    el._trackedBeforeState = trackedStateSnapshot();
+  }
+}
+
+function consumeEditorFieldBaseline(el) {
+  const before = el._trackedBeforeState || trackedStateSnapshot();
+  el._trackedBeforeState = null;
+  return before;
+}
+
+function undoLastAction() {
+  if (!undoStack.length) return;
+  const entry = undoStack.pop();
+  isApplyingHistory = true;
+  restoreTrackedState(entry.before);
+  isApplyingHistory = false;
+  redoStack.push(entry);
+  actionLog.push({ action: entry.action, at: new Date().toISOString(), direction: "undo" });
+  updateUndoRedoButtons();
+}
+
+function redoLastAction() {
+  if (!redoStack.length) return;
+  const entry = redoStack.pop();
+  isApplyingHistory = true;
+  restoreTrackedState(entry.after);
+  isApplyingHistory = false;
+  undoStack.push(entry);
+  actionLog.push({ action: entry.action, at: new Date().toISOString(), direction: "redo" });
+  updateUndoRedoButtons();
+}
+
+function updateUndoRedoButtons() {
+  if (el.undoBtn) el.undoBtn.disabled = undoStack.length === 0;
+  if (el.redoBtn) el.redoBtn.disabled = redoStack.length === 0;
+}
+
+function handleUndoRedoHotkeys(event) {
+  const zKey = String(event.key || "").toLowerCase() === "z";
+  if (!zKey) return;
+  if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+  event.preventDefault();
+  if (event.shiftKey) {
+    redoLastAction();
+  } else {
+    undoLastAction();
+  }
+}
+
+function mmddyyToInputValue(tag) {
+  const d = parseMMDDYY(tag);
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function inputValueToMMDDYY(value) {
+  if (!value) return null;
+  return yyyymmddToMMDDYY(value.replaceAll("-", ""));
+}
+
+function yyyymmddToMMDDYY(yyyymmdd) {
+  const yyyy = yyyymmdd.slice(0, 4);
+  const mm = yyyymmdd.slice(4, 6);
+  const dd = yyyymmdd.slice(6, 8);
+  const yy = yyyy.slice(-2);
+  return `${mm}${dd}${yy}`;
+}
+
+function parseYYYYMMDD(yyyymmdd) {
+  const yyyy = Number(yyyymmdd.slice(0, 4));
+  const mm = Number(yyyymmdd.slice(4, 6));
+  const dd = Number(yyyymmdd.slice(6, 8));
+  return new Date(yyyy, mm - 1, dd);
+}
+
+function snapshotRowsToFormRows(rows) {
+  return (rows || []).map((r) => ({
+    name: String(r.name || ""),
+    amount: parseRowAmount(r.value),
+    unit: normalizeUnit(r.unit)
+  }));
+}
+
+function latestSnapshot() {
+  if (!snapshots.length) return null;
+  return snapshots.slice().sort((a, b) => parseMMDDYY(b.date) - parseMMDDYY(a.date))[0];
+}
+
+function todayOrLatestSnapshot() {
+  const today = mmddyy(new Date());
+  return snapshots.find((s) => s.date === today) || latestSnapshot();
+}
+
+function seedTodayFormStateFromHistory({ save = true } = {}) {
+  const today = mmddyy(new Date());
+  if (editingSnapshotDate !== today) return;
+  const base = todayOrLatestSnapshot();
+  if (!base) return;
+  formState.assets = snapshotRowsToFormRows(base.assets);
+  formState.liabilities = snapshotRowsToFormRows(base.liabilities);
+  hasUnsavedAssetLiabilityChanges = false;
+  if (save) saveForm();
+}
+
+function todayHistoryRowSnapshot() {
+  const today = mmddyy(new Date());
+  const existingToday = snapshots.find((s) => s.date === today);
+  if (existingToday) return existingToday;
+
+  // Always base the synthetic today row on the latest saved snapshot's assets/liabilities
+  // valued at the current live exchange rate — not the currently selected form state.
+  const base = latestSnapshot();
+  const price = activeBtcusd() || (base && Number(base.btcusd) > 0 ? Number(base.btcusd) : 0);
+  const assets = base ? (base.assets || []).map((a) => ({ ...a })) : [];
+  const liabilities = base ? (base.liabilities || []).map((l) => ({ ...l })) : [];
+  const totals = computeTotals(assets, liabilities, price);
+
+  return {
+    date: today,
+    timestamp: new Date().toISOString(),
+    btcusd: price,
+    assets,
+    liabilities,
+    totals,
+    synthetic: true
+  };
+}
+
+function historyDatesIncludingToday() {
+  const today = mmddyy(new Date());
+  const out = new Set((snapshots || []).map((s) => s.date));
+  out.add(today);
+  return Array.from(out);
+}
+
+function chartXAtIndex(index, labelCount, x0, chartW) {
+  if (labelCount <= 1) return x0 + chartW / 2;
+  return x0 + (chartW * index) / (labelCount - 1);
+}
+
+function nearestHistoryDateForCanvasPoint(canvas, xPx) {
+  const state = chartInteractionState[canvas.id];
+  if (!state || !state.labels.length || !state.markerDates.length) return null;
+  const labels = state.labels;
+  const labelToIndex = new Map(labels.map((d, i) => [d, i]));
+  const chartW = canvas.width - CHART_PAD.l - CHART_PAD.r;
+  if (chartW <= 0) return null;
+
+  let best = null;
+  state.markerDates.forEach((date) => {
+    const idx = labelToIndex.get(date);
+    if (!Number.isInteger(idx)) return;
+    const mx = chartXAtIndex(idx, labels.length, CHART_PAD.l, chartW);
+    const dist = Math.abs(xPx - mx);
+    if (!best || dist < best.dist) best = { date, dist };
+  });
+  return best ? best.date : null;
+}
+
+function chartMouseX(canvas, event) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = rect.width > 0 ? canvas.width / rect.width : 1;
+  return (event.clientX - rect.left) * scaleX;
+}
+
+function syncChartRange(chartSnapshots, rangeState, startInputEl, endInputEl) {
+  if (!chartSnapshots.length) {
+    startInputEl.value = "";
+    endInputEl.value = "";
+    startInputEl.min = "";
+    startInputEl.max = "";
+    endInputEl.min = "";
+    endInputEl.max = "";
+    startInputEl.disabled = true;
+    endInputEl.disabled = true;
+    return { range: { startDate: null, endDate: null }, filtered: [] };
+  }
+
+  const minDate = chartSnapshots[0].date;
+  const maxDate = chartSnapshots[chartSnapshots.length - 1].date;
+  let startDate = rangeState.startDate || minDate;
+  let endDate = rangeState.endDate || maxDate;
+
+  if (parseMMDDYY(startDate) < parseMMDDYY(minDate)) startDate = minDate;
+  if (parseMMDDYY(startDate) > parseMMDDYY(maxDate)) startDate = maxDate;
+  if (parseMMDDYY(endDate) > parseMMDDYY(maxDate)) endDate = maxDate;
+  if (parseMMDDYY(endDate) < parseMMDDYY(minDate)) endDate = minDate;
+  if (parseMMDDYY(endDate) < parseMMDDYY(startDate)) endDate = startDate;
+
+  const minInput = mmddyyToInputValue(minDate);
+  const maxInput = mmddyyToInputValue(maxDate);
+  const startInput = mmddyyToInputValue(startDate);
+  const endInput = mmddyyToInputValue(endDate);
+
+  startInputEl.disabled = false;
+  endInputEl.disabled = false;
+  startInputEl.min = minInput;
+  startInputEl.max = endInput;
+  endInputEl.min = startInput;
+  endInputEl.max = maxInput;
+  startInputEl.value = startInput;
+  endInputEl.value = endInput;
+
+  return {
+    range: { startDate, endDate },
+    filtered: chartSnapshots.filter((snap) => {
+      const date = parseMMDDYY(snap.date);
+      return date >= parseMMDDYY(startDate) && date <= parseMMDDYY(endDate);
+    })
+  };
+}
+
+function getAllAssetNames() {
+  const names = new Set();
+  snapshots.forEach((s) => (s.assets || []).forEach((a) => { if (a.name) names.add(a.name); }));
+  (formState.assets || []).forEach((r) => { const n = String(r.name || "").trim(); if (n) names.add(n); });
+  return Array.from(names).sort();
+}
+
+function getAllLiabilityNames() {
+  const names = new Set();
+  snapshots.forEach((s) => (s.liabilities || []).forEach((l) => { if (l.name) names.add(l.name); }));
+  (formState.liabilities || []).forEach((r) => { const n = String(r.name || "").trim(); if (n) names.add(n); });
+  return Array.from(names).sort();
+}
+
+function buildFilterPanel(panelEl, names, excluded, onChange, actionName) {
+  panelEl.innerHTML = "";
+  if (!names.length) {
+    const msg = document.createElement("div");
+    msg.className = "filter-empty-msg";
+    msg.textContent = "No items";
+    panelEl.appendChild(msg);
+    return;
+  }
+
+  const itemCheckboxes = [];
+  const syncAllCheckbox = () => {
+    allCb.checked = itemCheckboxes.every((cb) => cb.checked);
+  };
+
+  const allLabel = document.createElement("label");
+  allLabel.className = "filter-checkbox-item filter-checkbox-item-all";
+  const allCb = document.createElement("input");
+  allCb.type = "checkbox";
+  allCb.checked = excluded.size === 0;
+  allCb.addEventListener("change", () => {
+    runTrackedAction(actionName, () => {
+      if (allCb.checked) {
+        excluded.clear();
+      } else {
+        names.forEach((name) => excluded.add(name));
+      }
+      itemCheckboxes.forEach((cb) => {
+        cb.checked = allCb.checked;
+      });
+      onChange();
+    });
+  });
+  allLabel.appendChild(allCb);
+  allLabel.appendChild(document.createTextNode("All"));
+  panelEl.appendChild(allLabel);
+
+  names.forEach((name) => {
+    const label = document.createElement("label");
+    label.className = "filter-checkbox-item";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !excluded.has(name);
+    itemCheckboxes.push(cb);
+    cb.addEventListener("change", () => {
+      runTrackedAction(actionName, () => {
+        if (cb.checked) excluded.delete(name);
+        else excluded.add(name);
+        syncAllCheckbox();
+        onChange();
+      });
+    });
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(name));
+    panelEl.appendChild(label);
+  });
+
+  syncAllCheckbox();
+}
+
+function updateFilterDropdownLabel(labelEl, btnEl, total, excluded) {
+  const hidden = excluded.size;
+  if (hidden === 0) {
+    labelEl.textContent = "All";
+    btnEl.classList.remove("has-exclusions");
+  } else {
+    labelEl.textContent = `${total - hidden} / ${total}`;
+    btnEl.classList.add("has-exclusions");
+  }
+}
+
+function populateFilterDropdowns() {
+  const assetNames = getAllAssetNames();
+  const liabilityNames = getAllLiabilityNames();
+
+  buildFilterPanel(el.assetsFilterPanel, assetNames, excludedAssets, () => {
+    updateFilterDropdownLabel(el.assetsFilterLabel, el.assetsFilterBtn, assetNames.length, excludedAssets);
+    saveFilters(currentMode);
+    renderChartsOnly();
+  }, "filter-assets");
+  buildFilterPanel(el.liabilitiesFilterPanel, liabilityNames, excludedLiabilities, () => {
+    updateFilterDropdownLabel(el.liabilitiesFilterLabel, el.liabilitiesFilterBtn, liabilityNames.length, excludedLiabilities);
+    saveFilters(currentMode);
+    renderChartsOnly();
+  }, "filter-liabilities");
+  updateFilterDropdownLabel(el.assetsFilterLabel, el.assetsFilterBtn, assetNames.length, excludedAssets);
+  updateFilterDropdownLabel(el.liabilitiesFilterLabel, el.liabilitiesFilterBtn, liabilityNames.length, excludedLiabilities);
+}
+
+function toggleFilterDropdown(type) {
+  const dropdown = document.getElementById(type === "assets" ? "assetsFilterDropdown" : "liabilitiesFilterDropdown");
+  const panel = type === "assets" ? el.assetsFilterPanel : el.liabilitiesFilterPanel;
+  const isOpen = !panel.hidden;
+  closeAllOverlays();
+  if (!isOpen) {
+    panel.hidden = false;
+    dropdown.classList.add("open");
+  }
+}
+
+function closeAllFilterDropdowns() {
+  ["assetsFilterDropdown", "liabilitiesFilterDropdown"].forEach((id) => {
+    const d = document.getElementById(id);
+    if (d) d.classList.remove("open");
+  });
+  if (el.assetsFilterPanel) el.assetsFilterPanel.hidden = true;
+  if (el.liabilitiesFilterPanel) el.liabilitiesFilterPanel.hidden = true;
+}
+
+function updateChartDateRangeFromInputs(changedField, { tracked = true } = {}) {
+  const applyRangeFromInputs = () => {
+    const startDate = inputValueToMMDDYY(el.chartStartDate.value);
+    const endDate = inputValueToMMDDYY(el.chartEndDate.value);
+
+    if (!startDate || !endDate) return;
+
+    if (parseMMDDYY(endDate) < parseMMDDYY(startDate)) {
+      if (changedField === "start") {
+        el.chartEndDate.value = el.chartStartDate.value;
+      } else {
+        el.chartStartDate.value = el.chartEndDate.value;
+      }
+    }
+
+    chartRange = {
+      startDate: inputValueToMMDDYY(el.chartStartDate.value),
+      endDate: inputValueToMMDDYY(el.chartEndDate.value)
+    };
+    renderChartsOnly();
+  };
+
+  if (!tracked || isApplyingHistory || isTrackingAction) {
+    applyRangeFromInputs();
+    return;
+  }
+  runTrackedAction(`chart-range-${changedField}`, applyRangeFromInputs);
+}
+
+function updateChartControlsDisabledState() {
+  const hasSnapshots = snapshots.length > 0;
+  const hasAssets = getAllAssetNames().length > 0;
+  const hasLiabilities = getAllLiabilityNames().length > 0;
+
+  const startBtn = document.getElementById("chartStartDateBtn");
+  const endBtn   = document.getElementById("chartEndDateBtn");
+  const assetsBtn = document.getElementById("assetsFilterBtn");
+  const liabsBtn  = document.getElementById("liabilitiesFilterBtn");
+
+  if (startBtn) startBtn.disabled = !hasSnapshots;
+  if (endBtn)   endBtn.disabled   = !hasSnapshots;
+  if (assetsBtn) assetsBtn.disabled = !hasAssets;
+  if (liabsBtn)  liabsBtn.disabled  = !hasLiabilities;
+}
+
+function renderChartsOnly() {
+  const displayPrice = activeBtcusd();
+  const chartSnapshots = snapshotsForCharts(displayPrice, excludedAssets, excludedLiabilities);
+  const synced = syncChartRange(chartSnapshots, chartRange, el.chartStartDate, el.chartEndDate);
+  chartRange = synced.range;
+
+  updateChartControlsDisabledState();
+  renderAssetLiabilityChart(synced.filtered);
+  renderNetChangeChart(synced.filtered);
+  if (window._chartDatePickersRefresh) window._chartDatePickersRefresh();
+}
+
+function attachChartInteractions() {
+  [el.alChart, el.netChart].forEach((canvas) => {
+    canvas.addEventListener("mousemove", (event) => {
+      const x = chartMouseX(canvas, event);
+      const rect = canvas.getBoundingClientRect();
+      const scaleY = rect.height > 0 ? canvas.height / rect.height : 1;
+      const nextY = (event.clientY - rect.top) * scaleY;
+      const nextHover = nearestHistoryDateForCanvasPoint(canvas, x);
+      const yChanged = Math.abs((hoveredCanvasY ?? nextY) - nextY) >= 1;
+      hoveredCanvasY = nextY;
+      if (nextHover !== hoveredSnapshotDate || (nextHover && yChanged)) {
+        hoveredSnapshotDate = nextHover;
+        renderChartsOnly();
+      }
+    });
+
+    canvas.addEventListener("mouseleave", () => {
+      hoveredCanvasY = null;
+      if (hoveredSnapshotDate !== null) {
+        hoveredSnapshotDate = null;
+        renderChartsOnly();
+      }
+    });
+
+    canvas.addEventListener("click", (event) => {
+      const x = chartMouseX(canvas, event);
+      const date = nearestHistoryDateForCanvasPoint(canvas, x);
+      if (!date) return;
+      hoveredSnapshotDate = date;
+      selectSnapshot(date);
+    });
+  });
+}
+
+function parseSnapshotsRaw(raw) {
+  const parsed = JSON.parse(raw);
+  const arr = Array.isArray(parsed) ? parsed : [];
+  return arr.sort((a, b) => parseMMDDYY(b.date) - parseMMDDYY(a.date));
+}
+
+async function bootstrap() {
+  // Probe server availability first (non-blocking for the initial render)
+  void probeServer();
+
+  renderAll();
+  startAutoQuoteRefresh();
+  if (!isManualOverrideActive()) {
+    void refreshQuote({ background: true });
+  }
+  updateModeToggleUI();
+
+  if (currentMode === "demo") {
+    resetDemoState();
+    snapshots = [];
+    formState = freshFormState("demo");
+    await fetchHistoricalPrices();
+    await loadDemoData();       // loads quickly with live quote as fallback price
+    // re-enrich snapshot prices now that historical data is available
+    snapshots = snapshots.map((snap) => {
+      const price = historicalPrices[snap.date];
+      if (!price) return snap;
+      const btcusd = Number(price);
+      const assetsBtc = {}, assetsUsd = {}, liabilitiesBtc = {}, liabilitiesUsd = {};
+      (snap.assets || []).forEach((a) => {
+        if (a.unit === "BTC") { assetsBtc[a.name] = Number(a.value ?? a.amount ?? 0); assetsUsd[a.name] = assetsBtc[a.name] * btcusd; }
+        else { assetsUsd[a.name] = Number(a.value ?? a.amount ?? 0); assetsBtc[a.name] = assetsUsd[a.name] / btcusd; }
+      });
+      (snap.liabilities || []).forEach((l) => {
+        if (l.unit === "BTC") { liabilitiesBtc[l.name] = Number(l.value ?? l.amount ?? 0); liabilitiesUsd[l.name] = liabilitiesBtc[l.name] * btcusd; }
+        else { liabilitiesUsd[l.name] = Number(l.value ?? l.amount ?? 0); liabilitiesBtc[l.name] = liabilitiesUsd[l.name] / btcusd; }
+      });
+      const tAB = sum(Object.values(assetsBtc)), tAU = sum(Object.values(assetsUsd));
+      const tLB = sum(Object.values(liabilitiesBtc)), tLU = sum(Object.values(liabilitiesUsd));
+      return { ...snap, btcusd, totals: { assets_btc: tAB, assets_usd: tAU, liabilities_btc: tLB, liabilities_usd: tLU, net_btc: tAB - tLB, net_usd: tAU - tLU } };
+    });
+    saveSnapshots();
+  } else {
+    // Live mode: wait for server probe, then load from file
+    await probeServer();
+    updateModeToggleUI();
+    await fetchHistoricalPrices();
+    if (serverAvailable) {
+      await ensureLiveBaseFileIfMissing();
+    }
+
+    // Helper: prompt for password with inline error on failure; returns true if unlocked, false if cancelled.
+    const promptAndUnlock = async (decryptFn, msgText = "") => {
+      const pw = await promptForPassword({
+        confirm: false,
+        message: msgText,
+        validator: async (p) => {
+          const ok = await decryptFn(p);
+          return ok ? null : "Incorrect password. Please try again.";
+        }
+      });
+      return pw !== null;
+    };
+
+    if (serverAvailable) {
+      if (liveEncryptionEnabled) {
+        const hasEncFile = (await fetchLiveHistoryFile()) !== null;
+        if (hasEncFile) {
+          const unlocked = await promptAndUnlock(async (pw) => {
+            try {
+              const raw = await fetchLiveHistoryFile();
+              if (!raw) return false;
+              const plain = await decryptText(raw, pw);
+              const parsed = parseLiveHistoryCsv(plain);
+              snapshots = parsed;
+              liveEncryptionPassword = pw;
+              seedTodayFormStateFromHistory({ save: false });
+              return true;
+            } catch { return false; }
+          });
+          if (!unlocked) {
+            // User cancelled — switch to demo mode rather than showing empty live data
+            await switchMode("demo");
+            renderAll();
+            return;
+          }
+        }
+      } else {
+        const loaded = await loadLiveSnapshotsFromServer();
+        snapshots = loaded;
+        seedTodayFormStateFromHistory({ save: true });
+      }
+    } else {
+      // No server — fall back to localStorage (encrypted or plain)
+      if (liveEncryptionEnabled) {
+        const hasEncData = Boolean(localStorage.getItem(STORE_KEY_LIVE_ENC));
+        if (hasEncData) {
+          const unlocked = await promptAndUnlock(async (pw) => {
+            const ok = await unlockLiveEncryptedData(pw);
+            if (ok) {
+              liveEncryptionPassword = pw;
+              seedTodayFormStateFromHistory({ save: false });
+            }
+            return ok;
+          });
+          if (!unlocked) {
+            await switchMode("demo");
+            renderAll();
+            return;
+          }
+        }
+      }
+    }
+  }
+  renderAll();
+}
+
+function startAutoQuoteRefresh() {
+  if (quoteRefreshTimer !== null) {
+    clearInterval(quoteRefreshTimer);
+    quoteRefreshTimer = null;
+  }
+  if (quoteRefreshAlignTimer !== null) {
+    clearTimeout(quoteRefreshAlignTimer);
+    quoteRefreshAlignTimer = null;
+  }
+
+  const now = Date.now();
+  const msUntilNextMinute = QUOTE_AUTO_REFRESH_MS - (now % QUOTE_AUTO_REFRESH_MS);
+  const firstDelay = msUntilNextMinute + QUOTE_AUTO_REFRESH_OFFSET_MS;
+
+  quoteRefreshAlignTimer = setTimeout(() => {
+    if (!isManualOverrideActive()) {
+      void refreshQuote({ background: true });
+    }
+    quoteRefreshTimer = setInterval(() => {
+      if (!isManualOverrideActive()) {
+        void refreshQuote({ background: true });
+      }
+    }, QUOTE_AUTO_REFRESH_MS);
+  }, firstDelay);
+}
+
+function parseFormFromRaw(raw, defaultForm) {
+  const parsed = JSON.parse(raw);
+  const merged = {
+    ...structuredClone(defaultForm),
+    ...parsed
+  };
+
+  if ((!Array.isArray(merged.assets) || !merged.assets.length) && (Array.isArray(parsed.assetsBtc) || Array.isArray(parsed.assetsUsd))) {
+    const migratedAssets = [];
+    (parsed.assetsBtc || []).forEach((r) => migratedAssets.push({
+      name: String(r.name || ""),
+      amount: Number(r.amount || 0),
+      unit: "BTC"
+    }));
+    (parsed.assetsUsd || []).forEach((r) => migratedAssets.push({
+      name: String(r.name || ""),
+      amount: Number(r.amount || 0),
+      unit: "USD"
+    }));
+    merged.assets = migratedAssets;
+  }
+
+  merged.assets = (merged.assets || []).map((r) => ({
+    name: String(r.name || ""),
+    amount: Number(r.amount || 0),
+    unit: normalizeUnit(r.unit)
+  }));
+
+  if ((!Array.isArray(merged.liabilities) || !merged.liabilities.length) && (Array.isArray(parsed.liabilitiesBtc) || Array.isArray(parsed.liabilitiesUsd))) {
+    const migratedLiabilities = [];
+    (parsed.liabilitiesBtc || []).forEach((r) => migratedLiabilities.push({
+      name: String(r.name || ""),
+      amount: Number(r.amount || 0),
+      unit: "BTC"
+    }));
+    (parsed.liabilitiesUsd || []).forEach((r) => migratedLiabilities.push({
+      name: String(r.name || ""),
+      amount: Number(r.amount || 0),
+      unit: "USD"
+    }));
+    merged.liabilities = migratedLiabilities;
+  }
+
+  merged.liabilities = (merged.liabilities || []).map((r) => ({
+    name: String(r.name || ""),
+    amount: Number(r.amount || 0),
+    unit: normalizeUnit(r.unit)
+  }));
+
+  const manual = Number(merged.manualBtcusd);
+  merged.manualBtcusd = Number.isFinite(manual) && manual > 0 ? manual : null;
+  merged.useManualBtcusd = Boolean(merged.useManualBtcusd) && Number.isFinite(merged.manualBtcusd);
+  return merged;
+}
+
+// ── Client-side AES-GCM encryption (Web Crypto API) ─────────────────────────
+
+function bytesToBase64(bytes) {
+  return btoa(String.fromCharCode(...bytes));
+}
+
+function base64ToBytes(b64) {
+  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+}
+
+async function deriveAesKey(password, salt) {
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw", enc.encode(password), "PBKDF2", false, ["deriveKey"]
+  );
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations: 210_000, hash: "SHA-256" },
+    keyMaterial,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
+
+async function encryptText(plaintext, password) {
+  const enc = new TextEncoder();
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv   = crypto.getRandomValues(new Uint8Array(12));
+  const key  = await deriveAesKey(password, salt);
+  const cipherBuf = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv }, key, enc.encode(plaintext)
+  );
+  // Format: base64(salt) + "." + base64(iv) + "." + base64(ciphertext)
+  return `${bytesToBase64(salt)}.${bytesToBase64(iv)}.${bytesToBase64(new Uint8Array(cipherBuf))}`;
+}
+
+async function decryptText(payload, password) {
+  const parts = payload.split(".");
+  if (parts.length !== 3) throw new Error("Invalid encrypted payload");
+  const salt   = base64ToBytes(parts[0]);
+  const iv     = base64ToBytes(parts[1]);
+  const cipher = base64ToBytes(parts[2]);
+  const key    = await deriveAesKey(password, salt);
+  const plainBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, cipher);
+  return new TextDecoder().decode(plainBuf);
+}
+
+// Prompt user for a new history filename. existingFiles blocks same-stem names.
+async function promptForFilename({ existingFiles = [] } = {}) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "enc-overlay";
+
+    const box = document.createElement("div");
+    box.className = "enc-dialog";
+
+    const msg = document.createElement("p");
+    msg.textContent = "Enter a name for the new history file.";
+    box.appendChild(msg);
+
+    const nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.placeholder = "e.g. my_history.csv or wallet.enc";
+    nameInput.className = "enc-input";
+    box.appendChild(nameInput);
+
+    const hint = document.createElement("p");
+    hint.className = "enc-error";
+    hint.style.display = "";
+    hint.style.color = "var(--text-muted, #888)";
+    hint.textContent = "Name must end with .csv or .enc";
+    box.appendChild(hint);
+
+    const btnRow = document.createElement("div");
+    btnRow.className = "enc-btn-row";
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.className = "enc-btn enc-btn-cancel";
+    cancelBtn.type = "button";
+
+    const okBtn = document.createElement("button");
+    okBtn.textContent = "Create";
+    okBtn.className = "enc-btn enc-btn-ok";
+    okBtn.type = "button";
+    okBtn.disabled = true;
+
+    btnRow.appendChild(cancelBtn);
+    btnRow.appendChild(okBtn);
+    box.appendChild(btnRow);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    nameInput.focus();
+
+    const validate = () => {
+      const v = nameInput.value.trim().toLowerCase();
+      const isValidExt = v.endsWith(".csv") || v.endsWith(".enc");
+      if (!isValidExt) {
+        hint.style.color = "var(--text-muted, #888)";
+        hint.textContent = "Name must end with .csv or .enc";
+        okBtn.disabled = true;
+        return;
+      }
+      const cleaned = v.replace(/[^a-zA-Z0-9_.\-]/g, "_");
+      const stem = cleaned.replace(/\.(csv|enc)$/, "");
+      const conflict = existingFiles.find((f) => f.replace(/\.(csv|enc)$/i, "").toLowerCase() === stem);
+      if (conflict) {
+        hint.style.color = "var(--color-error, #ef4444)";
+        hint.textContent = `"${conflict}" already exists. Choose a different name.`;
+        okBtn.disabled = true;
+      } else {
+        hint.style.color = "var(--text-muted, #888)";
+        hint.textContent = "Name must end with .csv or .enc";
+        okBtn.disabled = false;
+      }
+    };
+    nameInput.addEventListener("input", validate);
+
+    const cleanup = (val) => {
+      document.body.removeChild(overlay);
+      resolve(val);
+    };
+
+    cancelBtn.addEventListener("click", () => cleanup(null));
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) cleanup(null); });
+
+    const submit = () => {
+      if (okBtn.disabled) return;
+      const cleaned = nameInput.value.trim().replace(/[^a-zA-Z0-9_.\-]/g, "_");
+      cleanup(cleaned);
+    };
+
+    okBtn.addEventListener("click", submit);
+    nameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); if (e.key === "Escape") cleanup(null); });
+  });
+}
+
+async function promptForPassword({ confirm: needConfirm = false, message = "", validator = null } = {}) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "enc-overlay";
+
+    const box = document.createElement("div");
+    box.className = "enc-dialog";
+
+    const msg = document.createElement("p");
+    msg.textContent = message || (needConfirm ? "Set a password to encrypt your live data." : "Enter your password to unlock live data.");
+    box.appendChild(msg);
+
+    const pwInput = document.createElement("input");
+    pwInput.type = "password";
+    pwInput.placeholder = "Password";
+    pwInput.className = "enc-input";
+    box.appendChild(pwInput);
+
+    let confirmInput = null;
+    if (needConfirm) {
+      confirmInput = document.createElement("input");
+      confirmInput.type = "password";
+      confirmInput.placeholder = "Confirm password";
+      confirmInput.className = "enc-input";
+      box.appendChild(confirmInput);
+    }
+
+    const errMsg = document.createElement("p");
+    errMsg.className = "enc-error";
+    errMsg.style.display = "none";
+    box.appendChild(errMsg);
+
+    const btnRow = document.createElement("div");
+    btnRow.className = "enc-btn-row";
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.className = "enc-btn enc-btn-cancel";
+    cancelBtn.type = "button";
+
+    const okBtn = document.createElement("button");
+    okBtn.textContent = needConfirm ? "Set password" : "Unlock";
+    okBtn.className = "enc-btn enc-btn-ok";
+    okBtn.type = "button";
+
+    btnRow.appendChild(cancelBtn);
+    btnRow.appendChild(okBtn);
+    box.appendChild(btnRow);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    const cleanup = (val) => {
+      document.body.removeChild(overlay);
+      resolve(val);
+    };
+
+    cancelBtn.addEventListener("click", () => cleanup(null));
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) cleanup(null); });
+
+    const submit = async () => {
+      const pw = pwInput.value;
+      if (!pw) {
+        errMsg.textContent = "Password cannot be empty.";
+        errMsg.style.display = "";
+        return;
+      }
+      if (confirmInput && pw !== confirmInput.value) {
+        errMsg.textContent = "Passwords do not match.";
+        errMsg.style.display = "";
+        return;
+      }
+      if (validator) {
+        okBtn.disabled = true;
+        cancelBtn.disabled = true;
+        const err = await validator(pw);
+        okBtn.disabled = false;
+        cancelBtn.disabled = false;
+        if (err) {
+          errMsg.textContent = err;
+          errMsg.style.display = "";
+          pwInput.select();
+          pwInput.focus();
+          return;
+        }
+      }
+      cleanup(pw);
+    };
+
+    okBtn.addEventListener("click", submit);
+    pwInput.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+    if (confirmInput) confirmInput.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+
+    setTimeout(() => pwInput.focus(), 50);
+  });
+}
+
+// ── Server file I/O ─────────────────────────────────────────────────────────
+
+// Probe whether the local server is available. Sets serverAvailable.
+async function probeServer() {
+  try {
+    const res = await fetch(LIVE_HISTORY_API, { method: "HEAD", cache: "no-cache" });
+    serverAvailable = res.ok || res.status === 404; // 404 = server up, file missing
+    return serverAvailable;
+  } catch {
+    serverAvailable = false;
+    return false;
+  }
+}
+
+// Read live history from server. Returns raw text or null on failure.
+// Optionally pass a filenameOverride to read a specific file instead of liveHistoryFile.
+async function fetchLiveHistoryFile(filenameOverride = null) {
+  try {
+    const file = filenameOverride || liveHistoryFile;
+    const res = await fetch(`${LIVE_HISTORY_API}?file=${encodeURIComponent(file)}`, { cache: "no-cache" });
+    if (res.status === 404) return null; // file doesn't exist yet — that's fine
+    if (!res.ok) return null;
+    return await res.text();
+  } catch {
+    return null;
+  }
+}
+
+// Write live history to server. content is a plain CSV or encrypted string.
+async function writeLiveHistoryFile(content, encrypted = false) {
+  if (!serverAvailable) return;
+  try {
+    await fetch(LIVE_HISTORY_API, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file: liveHistoryFile, encrypted, content })
+    });
+  } catch { /* ignore — server may not be running */ }
+}
+
+// Parse my_history.csv text into snapshots array.
+function parseLiveHistoryCsv(text) {
+  if (!text || !text.trim()) return [];
+  try {
+    const rows = parseCsv(text);
+    return rows.map((row) => {
+      const yyyymmddDate = String(row.date).trim();
+      const mmddyyDate = yyyymmddToMMDDYY(yyyymmddDate);
+      const btcusd = Number(row.btcusd || historicalPrices[mmddyyDate] || formState.btcusd || 0);
+      const assets = typeof row.assets === "string" ? JSON.parse(row.assets) : (row.assets || []);
+      const liabilities = typeof row.liabilities === "string" ? JSON.parse(row.liabilities) : (row.liabilities || []);
+      return {
+        date: mmddyyDate,
+        timestamp: row.timestamp || parseMMDDYY(mmddyyDate).toISOString(),
+        btcusd,
+        assets,
+        liabilities,
+        totals: computeTotals(assets, liabilities, btcusd)
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+// Serialize snapshots to CSV string for my_history.csv.
+function snapshotsToCsv(snaps) {
+  const sorted = snaps.slice().sort((a, b) => parseMMDDYY(a.date) - parseMMDDYY(b.date));
+  const header = "date,btcusd,assets,liabilities";
+  const rows = sorted.map((s) => {
+    const yyyymmdd = mmddyyToInputValue(s.date).replaceAll("-", "");
+    const btcusd = Number(s.btcusd || 0);
+    const assets = JSON.stringify(s.assets || []);
+    const liabilities = JSON.stringify(s.liabilities || []);
+    // CSV-quote each field that may contain commas or quotes
+    const q = (v) => `"${String(v).replaceAll('"', '""')}"`;
+    return `${yyyymmdd},${btcusd},${q(assets)},${q(liabilities)}`;
+  });
+  return [header, ...rows].join("\n");
+}
+
+// Load live snapshots from server (or fall back to localStorage).
+async function loadLiveSnapshotsFromServer() {
+  const isEncrypted = liveHistoryFile.endsWith(".enc");
+  const raw = await fetchLiveHistoryFile();
+  if (raw === null) {
+    return [];
+  }
+  if (!isEncrypted) {
+    const parsed = parseLiveHistoryCsv(raw);
+    if (parsed.length > 0) {
+      // Sync to localStorage so offline access works
+      localStorage.setItem(STORE_KEY_LIVE, JSON.stringify(parsed));
+    }
+    return parsed;
+  }
+  // Encrypted path
+  if (!liveEncryptionPassword) return [];
+  try {
+    const plain = await decryptText(raw, liveEncryptionPassword);
+    const parsed = parseLiveHistoryCsv(plain);
+    return parsed;
+  } catch {
+    return [];
+  }
+}
+
+// If the selected live file is missing on the server, recreate a clean decrypted base file.
+async function ensureLiveBaseFileIfMissing() {
+  if (!serverAvailable || currentMode !== "live") return false;
+
+  const selected = liveHistoryFile || "";
+  const selectedRaw = selected ? await fetchLiveHistoryFile(selected) : null;
+  if (selectedRaw !== null) return false;
+
+  const prevBtcusd = Number(formState.btcusd || 0);
+  const prevManualBtcusd = formState.manualBtcusd;
+  const prevUseManual = formState.useManualBtcusd;
+
+  liveHistoryFile = "my_history.csv";
+  liveEncryptionEnabled = false;
+  liveEncryptionPassword = null;
+  liveAccessLocked = false;
+  localStorage.setItem(LIVE_HISTORY_FILE_KEY, liveHistoryFile);
+  localStorage.setItem(LIVE_ENCRYPTION_ENABLED_KEY, "0");
+
+  snapshots = [];
+  formState = structuredClone(DEFAULT_FORM_LIVE);
+  formState.btcusd = prevBtcusd;
+  formState.manualBtcusd = prevManualBtcusd;
+  formState.useManualBtcusd = prevUseManual;
+  editingSnapshotDate = mmddyy(new Date());
+  hasUnsavedAssetLiabilityChanges = false;
+  hoveredSnapshotDate = null;
+  chartRange = { startDate: null, endDate: null };
+  netChartRange = { startDate: null, endDate: null };
+  alChartRange = { startDate: null, endDate: null };
+  if (el.chartStartDate) el.chartStartDate.value = "";
+  if (el.chartEndDate) el.chartEndDate.value = "";
+
+  localStorage.setItem(STORE_KEY_LIVE, JSON.stringify([]));
+  localStorage.setItem(FORM_KEY_LIVE, JSON.stringify(formState));
+  localStorage.removeItem(STORE_KEY_LIVE_ENC);
+  localStorage.removeItem(FORM_KEY_LIVE_ENC);
+  await writeLiveHistoryFile(snapshotsToCsv([]), false);
+  return true;
+}
+
+// Save live snapshots to server (and localStorage as fallback).
+async function saveLiveSnapshotsToServer() {
+  const csv = snapshotsToCsv(snapshots);
+  const isEncrypted = liveHistoryFile.endsWith(".enc");
+  if (isEncrypted) {
+    if (!liveEncryptionPassword) {
+      const cached = liveFilePasswords.get(liveHistoryFile);
+      if (cached) {
+        liveEncryptionPassword = cached;
+      } else {
+        const pw = await promptForPassword({ confirm: false, message: `Enter password for ${liveHistoryFile}.` });
+        if (!pw) return;
+        liveEncryptionPassword = pw;
+        liveFilePasswords.set(liveHistoryFile, pw);
+      }
+    }
+    const enc = await encryptText(csv, liveEncryptionPassword);
+    localStorage.setItem(STORE_KEY_LIVE_ENC, enc);
+    await writeLiveHistoryFile(enc, true);
+  } else {
+    localStorage.setItem(STORE_KEY_LIVE, JSON.stringify(snapshots));
+    await writeLiveHistoryFile(csv, false);
+  }
+}
+
+// Fetch list of available history files from server.
+async function fetchAvailableLiveFiles() {
+  try {
+    const res = await fetch("/api/live-history/files", { cache: "no-cache" });
+    if (!res.ok) return [];
+    const files = await res.json();
+    return (Array.isArray(files) ? files : [])
+      .filter((f) => typeof f === "string")
+      .filter((f) => f !== "demo_history.csv")
+      .filter((f) => f.endsWith(".csv") || f.endsWith(".enc"));
+  } catch { return []; }
+}
+
+function closeLiveFileDropdown() {
+  if (el.liveFilePanel) el.liveFilePanel.hidden = true;
+  if (el.liveFileDropdown) el.liveFileDropdown.classList.remove("open");
+  if (el.liveFileBtn) el.liveFileBtn.setAttribute("aria-expanded", "false");
+}
+
+function setLiveAccessLocked() {
+  const prevBtcusd = formState.btcusd;
+  const prevManualBtcusd = formState.manualBtcusd;
+  const prevUseManual = formState.useManualBtcusd;
+
+  liveAccessLocked = true;
+  liveEncryptionPassword = null;
+  liveHistoryFile = "";
+  localStorage.removeItem(LIVE_HISTORY_FILE_KEY);
+  snapshots = [];
+  formState = structuredClone(DEFAULT_FORM_LIVE);
+  formState.btcusd = prevBtcusd;
+  formState.manualBtcusd = prevManualBtcusd;
+  formState.useManualBtcusd = prevUseManual;
+  editingSnapshotDate = mmddyy(new Date());
+  hasUnsavedAssetLiabilityChanges = false;
+  hoveredSnapshotDate = null;
+  chartRange = { startDate: null, endDate: null };
+  netChartRange = { startDate: null, endDate: null };
+  alChartRange = { startDate: null, endDate: null };
+  if (el.chartStartDate) el.chartStartDate.value = "";
+  if (el.chartEndDate) el.chartEndDate.value = "";
+  closeAllFilterDropdowns();
+  updateModeToggleUI();
+  renderAll();
+}
+
+// Populate the custom file menu from the server file list.
+async function populateLiveFileMenu() {
+  const displayFile = (liveAccessLocked || !liveHistoryFile) ? "-" : liveHistoryFile;
+  if (el.liveFileValue) el.liveFileValue.textContent = displayFile;
+  if (!el.liveFileList) return;
+  if (!serverAvailable) {
+    el.liveFileList.innerHTML = "";
+    const empty = document.createElement("div");
+    empty.className = "live-file-empty";
+    empty.textContent = "Server unavailable";
+    el.liveFileList.appendChild(empty);
+    return;
+  }
+  const files = await fetchAvailableLiveFiles();
+  const allFiles = liveHistoryFile && !files.includes(liveHistoryFile)
+    ? [liveHistoryFile, ...files]
+    : files;
+
+  el.liveFileList.innerHTML = "";
+  if (!allFiles.length) {
+    const empty = document.createElement("div");
+    empty.className = "live-file-empty";
+    empty.textContent = "No files found";
+    el.liveFileList.appendChild(empty);
+    return;
+  }
+
+  allFiles.forEach((file) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "live-file-option";
+    if (!liveAccessLocked && file === liveHistoryFile) btn.classList.add("active");
+    btn.textContent = file;
+    btn.addEventListener("click", async () => {
+      closeLiveFileDropdown();
+      if (liveAccessLocked || file !== liveHistoryFile) {
+        await switchLiveFile(file);
+      }
+      await populateLiveFileMenu();
+    });
+    el.liveFileList.appendChild(btn);
+  });
+}
+
+// Switch to a different history file, prompting for password if it's encrypted.
+async function switchLiveFile(filename) {
+  const isEnc = filename.endsWith(".enc");
+  if (isEnc) {
+    const raw = await fetchLiveHistoryFile(filename);
+
+    const requestPassword = async () => {
+      if (raw === null) {
+        return await promptForPassword({ confirm: false, message: `Enter password for ${filename}.` });
+      }
+      return await promptForPassword({
+        confirm: false,
+        message: `Enter password for ${filename}.`,
+        validator: async (entered) => {
+          try {
+            const plain = await decryptText(raw, entered);
+            parseLiveHistoryCsv(plain);
+            return null;
+          } catch {
+            return "Incorrect password. Please try again.";
+          }
+        }
+      });
+    };
+
+    const pw = await requestPassword();
+    if (!pw) {
+      setLiveAccessLocked();
+      await populateLiveFileMenu();
+      return;
+    }
+
+    if (raw !== null) {
+      try {
+        const plain = await decryptText(raw, pw);
+        snapshots = parseLiveHistoryCsv(plain);
+      } catch {
+        setLiveAccessLocked();
+        await populateLiveFileMenu();
+        return;
+      }
+    } else {
+      snapshots = []; // new empty encrypted file
+    }
+    liveEncryptionPassword = pw;
+    liveFilePasswords.set(filename, pw);
+    liveHistoryFile = filename;
+    localStorage.setItem(LIVE_HISTORY_FILE_KEY, liveHistoryFile);
+    liveAccessLocked = false;
+    liveEncryptionEnabled = true;
+    localStorage.setItem(LIVE_ENCRYPTION_ENABLED_KEY, "1");
+    el.liveEncryptionEnabled.checked = true;
+  } else {
+    const raw = await fetchLiveHistoryFile(filename);
+    snapshots = raw !== null ? parseLiveHistoryCsv(raw) : [];
+    liveHistoryFile = filename;
+    localStorage.setItem(LIVE_HISTORY_FILE_KEY, liveHistoryFile);
+    liveAccessLocked = false;
+    liveEncryptionEnabled = false;
+    liveEncryptionPassword = null;
+    localStorage.setItem(LIVE_ENCRYPTION_ENABLED_KEY, "0");
+    el.liveEncryptionEnabled.checked = false;
+  }
+
+  const prevBtcusd = formState.btcusd;
+  const prevManualBtcusd = formState.manualBtcusd;
+  const prevUseManual = formState.useManualBtcusd;
+  formState = structuredClone(DEFAULT_FORM_LIVE);
+  formState.btcusd = prevBtcusd;
+  formState.manualBtcusd = prevManualBtcusd;
+  formState.useManualBtcusd = prevUseManual;
+  editingSnapshotDate = mmddyy(new Date());
+  hasUnsavedAssetLiabilityChanges = false;
+  hoveredSnapshotDate = null;
+  chartRange = { startDate: null, endDate: null };
+  netChartRange = { startDate: null, endDate: null };
+  alChartRange = { startDate: null, endDate: null };
+  if (el.chartStartDate) el.chartStartDate.value = "";
+  if (el.chartEndDate) el.chartEndDate.value = "";
+  seedTodayFormStateFromHistory({ save: false });
+  updateModeToggleUI();
+  renderAll();
+}
+
+// Create a new live history file and switch to it.
+async function createLiveFile(filename) {
+  if (!serverAvailable) return;
+
+  const exists = (await fetchLiveHistoryFile(filename)) !== null;
+  if (exists) {
+    const overwrite = confirm(`${filename} already exists. Overwrite it?`);
+    if (!overwrite) return;
+  }
+
+  const prevFile = liveHistoryFile;
+  liveHistoryFile = filename;
+  localStorage.setItem(LIVE_HISTORY_FILE_KEY, liveHistoryFile);
+
+  const prevBtcusd = Number(formState.btcusd || 0);
+  const prevManualBtcusd = formState.manualBtcusd;
+  const prevUseManual = formState.useManualBtcusd;
+
+  if (filename.endsWith(".enc")) {
+    const pw = await promptForPassword({
+      confirm: true,
+      message: `Set a password for ${filename}.`
+    });
+    if (!pw) {
+      liveHistoryFile = prevFile;
+      localStorage.setItem(LIVE_HISTORY_FILE_KEY, liveHistoryFile);
+      return;
+    }
+
+    snapshots = [];
+    formState = structuredClone(DEFAULT_FORM_LIVE);
+    formState.btcusd = prevBtcusd;
+    formState.manualBtcusd = prevManualBtcusd;
+    formState.useManualBtcusd = prevUseManual;
+    liveEncryptionEnabled = true;
+    liveEncryptionPassword = pw;
+    liveFilePasswords.set(filename, pw);
+    localStorage.setItem(LIVE_ENCRYPTION_ENABLED_KEY, "1");
+    el.liveEncryptionEnabled.checked = true;
+
+    const enc = await encryptText(snapshotsToCsv([]), pw);
+    localStorage.setItem(STORE_KEY_LIVE_ENC, enc);
+    localStorage.removeItem(STORE_KEY_LIVE);
+    localStorage.removeItem(FORM_KEY_LIVE);
+    await writeLiveHistoryFile(enc, true);
+  } else {
+    snapshots = [];
+    formState = structuredClone(DEFAULT_FORM_LIVE);
+    formState.btcusd = prevBtcusd;
+    formState.manualBtcusd = prevManualBtcusd;
+    formState.useManualBtcusd = prevUseManual;
+
+    liveEncryptionEnabled = false;
+    liveEncryptionPassword = null;
+    localStorage.setItem(LIVE_ENCRYPTION_ENABLED_KEY, "0");
+    el.liveEncryptionEnabled.checked = false;
+
+    localStorage.setItem(STORE_KEY_LIVE, JSON.stringify([]));
+    localStorage.setItem(FORM_KEY_LIVE, JSON.stringify(formState));
+    localStorage.removeItem(STORE_KEY_LIVE_ENC);
+    localStorage.removeItem(FORM_KEY_LIVE_ENC);
+    await writeLiveHistoryFile(snapshotsToCsv([]), false);
+  }
+
+  seedTodayFormStateFromHistory({ save: false });
+  updateModeToggleUI();
+  renderAll();
+}
+
+function loadForm() {
+  // Synchronous path: demo mode, or live without encryption.
+  // Encrypted live data is loaded separately via loadLiveEncryptedData().
+  const key = currentMode === "demo" ? FORM_KEY_DEMO : FORM_KEY_LIVE;
+  const defaultForm = currentMode === "demo" ? DEFAULT_FORM_DEMO : DEFAULT_FORM_LIVE;
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return structuredClone(defaultForm);
+    return parseFormFromRaw(raw, defaultForm);
+  } catch {
+    const defaultForm = currentMode === "demo" ? DEFAULT_FORM_DEMO : DEFAULT_FORM_LIVE;
+    return structuredClone(defaultForm);
+  }
+}
+
+function resetDemoState() {
+  localStorage.removeItem(STORE_KEY_DEMO);
+  localStorage.removeItem(FORM_KEY_DEMO);
+}
+
+function saveForm() {
+  if (currentMode === "live" && liveEncryptionEnabled && liveEncryptionPassword) {
+    // Fire-and-forget async encrypt save
+    encryptText(JSON.stringify(formState), liveEncryptionPassword)
+      .then((enc) => localStorage.setItem(FORM_KEY_LIVE_ENC, enc))
+      .catch(() => {});
+    return;
+  }
+  const key = currentMode === "demo" ? FORM_KEY_DEMO : FORM_KEY_LIVE;
+  localStorage.setItem(key, JSON.stringify(formState));
+}
+
+function loadSnapshots() {
+  try {
+    const key = currentMode === "demo" ? STORE_KEY_DEMO : STORE_KEY_LIVE;
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    return parseSnapshotsRaw(raw);
+  } catch {
+    return [];
+  }
+}
+
+function saveSnapshots() {
+  if (currentMode === "live") {
+    if (liveAccessLocked || !liveHistoryFile) return;
+    void saveLiveSnapshotsToServer();
+    return;
+  }
+  // Demo mode: localStorage only
+  const sorted = snapshots.slice().sort((a, b) => parseMMDDYY(b.date) - parseMMDDYY(a.date));
+  localStorage.setItem(STORE_KEY_DEMO, JSON.stringify(sorted));
+}
+
+async function refreshQuote({ background = false } = {}) {
+  if (quoteRefreshInFlight) return;
+  quoteRefreshInFlight = true;
+  try {
+    const response = await fetch(KRAKEN_URL, { cache: "no-cache" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    const usdcusd = Number(payload.result.USDCUSD.a[0]);
+    const btcusdc = Number(payload.result.XBTUSDC.a[0]);
+    const price = btcusdc / usdcusd;
+    formState.btcusd = price;
+    lastQuoteRefreshAt = new Date();
+    // Persist price globally so it survives mode/file switches.
+    localStorage.setItem(BTCUSD_CACHE_KEY, String(price));
+    // Refresh always returns the UI to live exchange rate mode.
+    formState.useManualBtcusd = false;
+    formState.manualBtcusd = null;
+    manualEditedThisSession = false;
+    saveForm();
+
+    // Also update the other mode's stored price so today's row is current in both modes
+    const otherKey = currentMode === "demo" ? FORM_KEY_LIVE : FORM_KEY_DEMO;
+    try {
+      const otherRaw = localStorage.getItem(otherKey);
+      const otherForm = otherRaw ? JSON.parse(otherRaw) : {};
+      otherForm.btcusd = price;
+      if (!otherForm.useManualBtcusd) {
+        otherForm.manualBtcusd = price;
+      }
+      localStorage.setItem(otherKey, JSON.stringify(otherForm));
+    } catch { /* ignore */ }
+
+    renderAll();
+  } catch (err) {
+    el.quoteTime.textContent = `Quote refresh failed: ${String(err)}`;
+  } finally {
+    quoteRefreshInFlight = false;
+  }
+}
+
+function commitManualQuote() {
+  const before = consumeEditorFieldBaseline(el.manualBtcusd);
+  runTrackedActionFromBefore("manual-btcusd", before, () => {
+    const raw = el.manualBtcusd.value.replace(/[$,]/g, "").trim();
+    if (!raw) {
+      formState.manualBtcusd = Number(formState.btcusd || 0) || null;
+      activateManualSource();
+      return;
+    }
+    const num = Number(raw);
+    if (!Number.isFinite(num) || num < 0) {
+      renderAll();
+      return;
+    }
+    manualEditedThisSession = true;
+    formState.manualBtcusd = num;
+    activateManualSource();
+  });
+}
+
+function activateManualSource() {
+  if (!Number.isFinite(Number(formState.manualBtcusd)) || Number(formState.manualBtcusd) <= 0) {
+    const fallback = Number(formState.btcusd || 0);
+    formState.manualBtcusd = fallback > 0 ? fallback : null;
+  }
+  if (!Number.isFinite(Number(formState.manualBtcusd)) || Number(formState.manualBtcusd) <= 0) {
+    formState.useManualBtcusd = false;
+    saveForm();
+    renderAll();
+    return;
+  }
+  formState.useManualBtcusd = true;
+  saveForm();
+  renderAll();
+}
+
+function isManualOverrideActive() {
+  return Boolean(formState.useManualBtcusd) && Number.isFinite(Number(formState.manualBtcusd)) && Number(formState.manualBtcusd) > 0;
+}
+
+function activeBtcusd() {
+  if (isManualOverrideActive()) {
+    return Number(formState.manualBtcusd);
+  }
+  return Number(formState.btcusd || 0);
+}
+
+function addRow(target) {
+  const map = {
+    assetsRows: "assets",
+    liabilitiesRows: "liabilities"
+  };
+  const key = map[target];
+  if (!key) return;
+  runTrackedAction("row-add", () => {
+    formState[key].unshift({ name: "", amount: 0, unit: "USD", _fresh: true });
+    hasUnsavedAssetLiabilityChanges = true;
+    pendingRowFocus = { key, idx: 0 };
+    saveForm();
+    persistSnapshotForActiveSelection({ render: true, onlyIfDirty: true, trackAction: false });
+  });
+}
+
+function removeRow(key, idx) {
+  runTrackedAction("row-delete", () => {
+    formState[key].splice(idx, 1);
+    hasUnsavedAssetLiabilityChanges = true;
+    saveForm();
+    persistSnapshotForActiveSelection({ render: true, onlyIfDirty: true, trackAction: false });
+  });
+}
+
+function sanitizeRows(rows) {
+  return rows
+    .map((r) => ({ name: String(r.name || "").trim(), amount: parseRowAmount(r.amount) }))
+    .filter((r) => r.name && Number.isFinite(r.amount));
+}
+
+function canonicalRowName(name) {
+  return String(name || "").trim().toLowerCase();
+}
+
+function duplicateRowIndices(rows) {
+  const counts = new Map();
+  const duplicates = new Set();
+  (rows || []).forEach((row) => {
+    const key = canonicalRowName(row?.name);
+    if (!key) return;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  });
+
+  (rows || []).forEach((row, idx) => {
+    const key = canonicalRowName(row?.name);
+    if (!key) return;
+    if ((counts.get(key) || 0) > 1) {
+      duplicates.add(idx);
+    }
+  });
+  return duplicates;
+}
+
+function uniqueValidRows(rows) {
+  const seen = new Set();
+  const unique = [];
+  (rows || []).slice().reverse().forEach((row) => {
+    const name = String(row?.name || "").trim();
+    const amountSource = typeof row?.amount !== "undefined" ? row.amount : row?.value;
+    const amount = parseRowAmount(amountSource);
+    const unit = normalizeUnit(row?.unit);
+    const key = canonicalRowName(name);
+    if (!key || !Number.isFinite(amount) || seen.has(key)) return;
+    seen.add(key);
+    unique.unshift({ name, amount, unit });
+  });
+  return unique;
+}
+
+function parseRowAmount(value) {
+  if (value === "" || value === null || typeof value === "undefined") return NaN;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : NaN;
+}
+
+function isRowComplete(row) {
+  const name = String(row.name || "").trim();
+  const amount = parseRowAmount(row.amount);
+  return Boolean(name) && Number.isFinite(amount);
+}
+
+function rowsToObject(rows) {
+  const out = {};
+  uniqueValidRows(rows).forEach((r) => {
+    out[r.name] = (out[r.name] || 0) + Number(r.amount);
+  });
+  return out;
+}
+
+function splitAssetRows(rows) {
+  const assetsBtc = {};
+  const assetsUsd = {};
+
+  uniqueValidRows(rows).forEach((r) => {
+    const name = r.name;
+    const amount = r.amount;
+    const unit = r.unit;
+    if (unit === "BTC") {
+      assetsBtc[name] = (assetsBtc[name] || 0) + amount;
+    } else if (unit === "sats") {
+      assetsBtc[name] = (assetsBtc[name] || 0) + (amount / 1e8);
+    } else {
+      assetsUsd[name] = (assetsUsd[name] || 0) + amount;
+    }
+  });
+
+  return { assetsBtc, assetsUsd };
+}
+
+function splitLiabilityRows(rows) {
+  const liabilitiesBtc = {};
+  const liabilitiesUsd = {};
+
+  uniqueValidRows(rows).forEach((r) => {
+    const name = r.name;
+    const amount = r.amount;
+    const unit = r.unit;
+    if (unit === "BTC") {
+      liabilitiesBtc[name] = (liabilitiesBtc[name] || 0) + amount;
+    } else if (unit === "sats") {
+      liabilitiesBtc[name] = (liabilitiesBtc[name] || 0) + (amount / 1e8);
+    } else {
+      liabilitiesUsd[name] = (liabilitiesUsd[name] || 0) + amount;
+    }
+  });
+
+  return { liabilitiesBtc, liabilitiesUsd };
+}
+
+function normalizedSnapshot(btcusdOverride = null) {
+  const sourcePrice = btcusdOverride === null ? Number(formState.btcusd || 0) : Number(btcusdOverride || 0);
+  const btcusd = Math.max(sourcePrice, 1e-12);
+  const uniqueAssets = uniqueValidRows(formState.assets || []);
+  const uniqueLiabilities = uniqueValidRows(formState.liabilities || []);
+  const splitAssets = splitAssetRows(formState.assets || []);
+  const splitLiabilities = splitLiabilityRows(formState.liabilities || []);
+  const assetsBtc = splitAssets.assetsBtc;
+  const assetsUsd = splitAssets.assetsUsd;
+  const liabilitiesBtc = splitLiabilities.liabilitiesBtc;
+  const liabilitiesUsd = splitLiabilities.liabilitiesUsd;
+
+  Object.entries(assetsBtc).forEach(([name, v]) => {
+    assetsUsd[name] = v * btcusd;
+  });
+  Object.entries(assetsUsd).forEach(([name, v]) => {
+    assetsBtc[name] = v / btcusd;
+  });
+
+  Object.entries(liabilitiesBtc).forEach(([name, v]) => {
+    liabilitiesUsd[name] = v * btcusd;
+  });
+  Object.entries(liabilitiesUsd).forEach(([name, v]) => {
+    liabilitiesBtc[name] = v / btcusd;
+  });
+
+  const totalAssetsBtc = sum(Object.values(assetsBtc));
+  const totalAssetsUsd = sum(Object.values(assetsUsd));
+  const totalLiabilitiesBtc = sum(Object.values(liabilitiesBtc));
+  const totalLiabilitiesUsd = sum(Object.values(liabilitiesUsd));
+
+  return {
+    date: mmddyy(new Date()),
+    timestamp: new Date().toISOString(),
+    btcusd,
+    assets: uniqueAssets.map((r) => ({ name: r.name, value: r.amount, unit: r.unit })),
+    liabilities: uniqueLiabilities.map((r) => ({ name: r.name, value: r.amount, unit: r.unit })),
+    totals: {
+      assets_btc: totalAssetsBtc,
+      assets_usd: totalAssetsUsd,
+      liabilities_btc: totalLiabilitiesBtc,
+      liabilities_usd: totalLiabilitiesUsd,
+      net_btc: totalAssetsBtc - totalLiabilitiesBtc,
+      net_usd: totalAssetsUsd - totalLiabilitiesUsd
+    }
+  };
+}
+
+function sum(arr) {
+  return arr.reduce((acc, n) => acc + Number(n || 0), 0);
+}
+
+function saveSnapshot() {
+  persistSnapshotForActiveSelection({ render: true });
+}
+
+function persistSnapshotForActiveSelection({ render = true, onlyIfDirty = false, trackAction = true, actionLabel = "snapshot-update" } = {}) {
+  if (currentMode === "live" && (liveAccessLocked || !liveHistoryFile)) {
+    if (render) renderAll();
+    return;
+  }
+
+  const applyPersist = () => {
+    if (onlyIfDirty && !hasUnsavedAssetLiabilityChanges) {
+      if (render) renderAll();
+      return;
+    }
+    const targetDate = editingSnapshotDate || mmddyy(new Date());
+    const existing = snapshots.find((s) => s.date === targetDate);
+
+    // If all assets and liabilities have been removed, delete the snapshot entirely
+    const hasAnyRows =
+      (formState.assets || []).some((r) => r.name && parseRowAmount(r.amount) > 0) ||
+      (formState.liabilities || []).some((r) => r.name && parseRowAmount(r.amount) > 0);
+    if (!hasAnyRows && existing) {
+      snapshots = snapshots.filter((s) => s.date !== targetDate);
+      hasUnsavedAssetLiabilityChanges = false;
+      saveSnapshots();
+      if (render) renderAll();
+      return;
+    }
+
+    const sourcePrice = existing && Number(existing.btcusd) > 0 ? Number(existing.btcusd) : Number(formState.btcusd || 0);
+    const snap = normalizedSnapshot(sourcePrice);
+    snap.date = targetDate;
+    snap.timestamp = existing?.timestamp || new Date().toISOString();
+    const idx = snapshots.findIndex((s) => s.date === targetDate);
+    if (idx >= 0) snapshots[idx] = snap;
+    else snapshots.push(snap);
+    snapshots.sort((a, b) => parseMMDDYY(a.date) - parseMMDDYY(b.date));
+    hasUnsavedAssetLiabilityChanges = false;
+    saveSnapshots();
+    if (render) renderAll();
+  };
+
+  if (!trackAction) {
+    applyPersist();
+    return;
+  }
+  runTrackedAction(actionLabel, applyPersist);
+}
+
+function comparableRowsFromForm(rows) {
+  return (rows || [])
+    .map((r) => ({
+      name: String(r.name || "").trim(),
+      value: parseRowAmount(r.amount),
+      unit: normalizeUnit(r.unit)
+    }))
+    .filter((r) => r.name && Number.isFinite(r.value))
+    .sort((a, b) => (a.name + a.unit).localeCompare(b.name + b.unit));
+}
+
+function comparableRowsFromSnapshot(rows) {
+  return (rows || [])
+    .map((r) => ({
+      name: String(r.name || "").trim(),
+      value: parseRowAmount(r.value),
+      unit: normalizeUnit(r.unit)
+    }))
+    .filter((r) => r.name && Number.isFinite(r.value))
+    .sort((a, b) => (a.name + a.unit).localeCompare(b.name + b.unit));
+}
+
+function rowsSignature(rows) {
+  return JSON.stringify(rows.map((r) => [r.name, r.unit, Number(r.value).toFixed(8)]));
+}
+
+function inferEditingSnapshotDate() {
+  const today = mmddyy(new Date());
+  if (!snapshots.length) return today;
+
+  const assetsSig = rowsSignature(comparableRowsFromForm(formState.assets));
+  const liabilitiesSig = rowsSignature(comparableRowsFromForm(formState.liabilities));
+  const match = snapshots.find((s) => {
+    const snapAssetsSig = rowsSignature(comparableRowsFromSnapshot(s.assets));
+    const snapLiabilitiesSig = rowsSignature(comparableRowsFromSnapshot(s.liabilities));
+    return snapAssetsSig === assetsSig && snapLiabilitiesSig === liabilitiesSig;
+  });
+  return match ? match.date : today;
+}
+
+function selectSnapshot(date) {
+  const today = mmddyy(new Date());
+  editingSnapshotDate = date;
+  const snap = snapshots.find((s) => s.date === date);
+  if (!snap) {
+    if (date === today) {
+      seedTodayFormStateFromHistory({ save: true });
+      hasUnsavedAssetLiabilityChanges = false;
+      saveForm();
+      renderAll();
+    }
+    return;
+  }
+  formState.assets = (snap.assets || []).map((a) => ({
+    name: String(a.name || ""),
+    amount: parseRowAmount(a.value),
+    unit: normalizeUnit(a.unit)
+  }));
+  formState.liabilities = (snap.liabilities || []).map((l) => ({
+    name: String(l.name || ""),
+    amount: parseRowAmount(l.value),
+    unit: normalizeUnit(l.unit)
+  }));
+  hasUnsavedAssetLiabilityChanges = false;
+  saveForm();
+  renderAll();
+}
+
+function addSnapshotForDate(mmddyyDate) {
+  if (snapshots.some((s) => s.date === mmddyyDate)) return;
+
+  const sorted = snapshots.slice().sort((a, b) => parseMMDDYY(a.date) - parseMMDDYY(b.date));
+  const targetMs = parseMMDDYY(mmddyyDate).getTime();
+
+  let prevSnap = null;
+  let nextSnap = null;
+  for (const s of sorted) {
+    const ms = parseMMDDYY(s.date).getTime();
+    if (ms < targetMs) prevSnap = s;
+    else if (ms > targetMs && !nextSnap) nextSnap = s;
+  }
+
+  const seedSnap = prevSnap || nextSnap;
+  const btcusd = Number(historicalPrices[mmddyyDate] || formState.btcusd || 0);
+  const assets = (seedSnap ? (seedSnap.assets || []) : []).map((a) => ({ ...a }));
+  const liabilities = (seedSnap ? (seedSnap.liabilities || []) : []).map((l) => ({ ...l }));
+
+  const newSnap = {
+    date: mmddyyDate,
+    timestamp: parseMMDDYY(mmddyyDate).toISOString(),
+    btcusd,
+    assets,
+    liabilities,
+    totals: computeTotals(assets, liabilities, btcusd)
+  };
+
+  runTrackedAction("snapshot-add-date", () => {
+    const isEarlierThanAll = prevSnap === null && sorted.length > 0;
+    snapshots.push(newSnap);
+    editingSnapshotDate = mmddyyDate;
+    formState.assets = assets.map((a) => ({
+      name: String(a.name || ""),
+      amount: parseRowAmount(a.value),
+      unit: normalizeUnit(a.unit)
+    }));
+    formState.liabilities = liabilities.map((l) => ({
+      name: String(l.name || ""),
+      amount: parseRowAmount(l.value),
+      unit: normalizeUnit(l.unit)
+    }));
+    hasUnsavedAssetLiabilityChanges = false;
+    saveForm();
+    saveSnapshots();
+    if (isEarlierThanAll) {
+      el.chartStartDate.value = mmddyyToInputValue(mmddyyDate);
+      chartRange = {
+        startDate: mmddyyDate,
+        endDate: inputValueToMMDDYY(el.chartEndDate.value) || mmddyyDate
+      };
+    }
+    renderAll();
+    setTimeout(() => {
+      const activeRow = document.querySelector("#historyTableBody tr.active-snapshot");
+      if (activeRow) activeRow.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }, 50);
+  });
+}
+
+function deleteSnapshot(date) {
+  runTrackedAction("snapshot-delete", () => {
+    const idx = snapshots.findIndex((s) => s.date === date);
+    if (idx < 0) return;
+    const today = mmddyy(new Date());
+    const deletingToday = date === today;
+    snapshots.splice(idx, 1);
+
+    if (editingSnapshotDate === date) {
+      const replacement = latestSnapshot();
+      if (deletingToday) {
+        // Stay on today but revert form values to the most recent remaining snapshot.
+        editingSnapshotDate = today;
+        if (replacement) {
+          formState.assets = (replacement.assets || []).map((a) => ({
+            name: String(a.name || ""),
+            amount: parseRowAmount(a.value),
+            unit: normalizeUnit(a.unit)
+          }));
+          formState.liabilities = (replacement.liabilities || []).map((l) => ({
+            name: String(l.name || ""),
+            amount: parseRowAmount(l.value),
+            unit: normalizeUnit(l.unit)
+          }));
+        } else {
+          formState.assets = [];
+          formState.liabilities = [];
+        }
+      } else if (replacement) {
+        editingSnapshotDate = replacement.date;
+        formState.assets = (replacement.assets || []).map((a) => ({
+          name: String(a.name || ""),
+          amount: parseRowAmount(a.value),
+          unit: normalizeUnit(a.unit)
+        }));
+        formState.liabilities = (replacement.liabilities || []).map((l) => ({
+          name: String(l.name || ""),
+          amount: parseRowAmount(l.value),
+          unit: normalizeUnit(l.unit)
+        }));
+      } else {
+        editingSnapshotDate = today;
+        formState.assets = [];
+        formState.liabilities = [];
+      }
+    }
+
+    hasUnsavedAssetLiabilityChanges = false;
+    saveForm();
+    saveSnapshots();
+    renderAll();
+  });
+}
+
+function formatUsd(v) {
+  return `$${Number(v || 0).toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}`;
+}
+
+function formatBtc(v) {
+  return `${Number(v || 0).toFixed(8)} BTC`;
+}
+
+function normalizeUnit(unit) {
+  const upper = String(unit || "USD").toUpperCase();
+  if (upper === "BTC") return "BTC";
+  if (upper === "SATS") return "sats";
+  return "USD";
+}
+
+function decimalsForUnit(unit) {
+  if (unit === "BTC") return 8;
+  if (unit === "sats") return 0;
+  return 2;
+}
+
+function stepForUnit(unit) {
+  if (unit === "BTC") return "0.00000001";
+  if (unit === "sats") return "1";
+  return "0.01";
+}
+
+function formatAmountInputValue(amount, unit) {
+  const parsed = parseRowAmount(amount);
+  if (!Number.isFinite(parsed)) return "";
+  return parsed.toFixed(decimalsForUnit(unit));
+}
+
+function renderEditor(container, key) {
+  container.innerHTML = "";
+  formState[key].forEach((row, idx) => {
+    const wrap = document.createElement("div");
+    wrap.className = key === "assets" || key === "liabilities" ? "row-editor four-col" : "row-editor";
+    const unitValue = normalizeUnit(row.unit);
+
+    const name = document.createElement("input");
+    name.placeholder = "name";
+    name.value = row.name;
+    name.dataset.rowKey = key;
+    name.dataset.rowIndex = String(idx);
+    name.addEventListener("focus", () => captureEditorFieldBaseline(name));
+    name.addEventListener("input", () => {
+      const wasComplete = isRowComplete(formState[key][idx]);
+      const prevName = formState[key][idx].name;
+      formState[key][idx].name = name.value;
+      if (prevName !== name.value) {
+        hasUnsavedAssetLiabilityChanges = true;
+      }
+      saveForm();
+      updateEditorDuplicateWarnings(container, key);
+      if (!wasComplete && isRowComplete(formState[key][idx])) {
+        persistSnapshotForActiveSelection({ render: false, onlyIfDirty: true, trackAction: false });
+      }
+    });
+    name.addEventListener("blur", (e) => {
+      const before = consumeEditorFieldBaseline(name);
+      runTrackedActionFromBefore(`${key}-name-edit`, before, () => {
+        hasUnsavedAssetLiabilityChanges = true;
+        const next = e.relatedTarget;
+        const stayingInSameRow = Boolean(next && wrap.contains(next));
+        persistSnapshotForActiveSelection({ render: !stayingInSameRow, onlyIfDirty: false, trackAction: false });
+      });
+    });
+
+    const amount = document.createElement("input");
+    amount.type = "number";
+    amount.min = "0";
+    amount.step = stepForUnit(unitValue);
+    amount.placeholder = "amount";
+    amount.value = formatAmountInputValue(row.amount, unitValue);
+    amount.addEventListener("focus", () => captureEditorFieldBaseline(amount));
+    amount.addEventListener("input", () => {
+      const wasComplete = isRowComplete(formState[key][idx]);
+      const prevAmount = formState[key][idx].amount;
+      const next = amount.value === "" ? "" : Math.max(0, Number(amount.value));
+      formState[key][idx].amount = next;
+      // Once the user explicitly types an amount, the row is no longer "fresh"
+      if (next !== "" && next !== 0) delete formState[key][idx]._fresh;
+      if (String(prevAmount) !== String(next)) {
+        hasUnsavedAssetLiabilityChanges = true;
+      }
+      saveForm();
+      if (!wasComplete && isRowComplete(formState[key][idx])) {
+        persistSnapshotForActiveSelection({ render: false, onlyIfDirty: true, trackAction: false });
+      }
+    });
+    amount.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") amount.blur();
+      if (e.key === "Tab" && !e.shiftKey && (key === "assets" || key === "liabilities")) {
+        // Keep focus flow predictable inside a row: Name -> Unit -> Amount
+        e.preventDefault();
+        const nextWrap = wrap.nextElementSibling;
+        if (nextWrap) {
+          const nextName = nextWrap.querySelector("input");
+          if (nextName) {
+            nextName.focus();
+            nextName.select();
+            return;
+          }
+        }
+        const addBtn = document.querySelector(`.add-row-btn[data-target="${container.id}"]`);
+        if (addBtn) addBtn.focus();
+      }
+    });
+    amount.addEventListener("blur", (e) => {
+      const before = consumeEditorFieldBaseline(amount);
+      const cur = formState[key][idx].amount;
+      if (cur !== "") {
+        amount.value = formatAmountInputValue(cur, normalizeUnit(formState[key][idx].unit));
+      }
+      runTrackedActionFromBefore(`${key}-amount-edit`, before, () => {
+        hasUnsavedAssetLiabilityChanges = true;
+        const next = e.relatedTarget;
+        const stayingInSameRow = Boolean(next && wrap.contains(next));
+        persistSnapshotForActiveSelection({ render: !stayingInSameRow, onlyIfDirty: false, trackAction: false });
+      });
+    });
+
+    let unit = null;
+    if (key === "assets" || key === "liabilities") {
+      unit = document.createElement("select");
+      const optUsd = document.createElement("option");
+      optUsd.value = "USD";
+      optUsd.textContent = "USD";
+      const optBtc = document.createElement("option");
+      optBtc.value = "BTC";
+      optBtc.textContent = "BTC";
+      const optSats = document.createElement("option");
+      optSats.value = "sats";
+      optSats.textContent = "sats";
+      unit.append(optUsd, optBtc, optSats);
+      unit.value = unitValue;
+      unit.addEventListener("change", () => {
+        pendingRowFieldFocus = { key, idx, field: "unit" };
+        const before = trackedStateSnapshot();
+        runTrackedActionFromBefore(`${key}-unit-edit`, before, () => {
+          const prevUnit = normalizeUnit(formState[key][idx].unit);
+          const nextUnit = normalizeUnit(unit.value);
+          let nextAmount = formState[key][idx].amount;
+          const parsedAmount = parseRowAmount(nextAmount);
+          // Skip conversion for fresh rows (user hasn't committed an amount yet)
+          const isFresh = Boolean(formState[key][idx]._fresh);
+          if (!isFresh && Number.isFinite(parsedAmount)) {
+            const datePrice = Number(historicalPrices[editingSnapshotDate]) || activeBtcusd();
+            if (prevUnit === "BTC" && nextUnit === "sats") {
+              nextAmount = Math.round(parsedAmount * 1e8);
+            } else if (prevUnit === "sats" && nextUnit === "BTC") {
+              nextAmount = Number((parsedAmount / 1e8).toFixed(8));
+            } else if (prevUnit === "BTC" && nextUnit === "USD" && datePrice > 0) {
+              nextAmount = Number((parsedAmount * datePrice).toFixed(2));
+            } else if (prevUnit === "USD" && nextUnit === "BTC" && datePrice > 0) {
+              nextAmount = Number((parsedAmount / datePrice).toFixed(8));
+            } else if (prevUnit === "sats" && nextUnit === "USD" && datePrice > 0) {
+              nextAmount = Number(((parsedAmount / 1e8) * datePrice).toFixed(2));
+            } else if (prevUnit === "USD" && nextUnit === "sats" && datePrice > 0) {
+              nextAmount = Math.round((parsedAmount / datePrice) * 1e8);
+            }
+          }
+          formState[key][idx].amount = nextAmount;
+          formState[key][idx].unit = nextUnit;
+          // Update the amount input display to match new unit formatting
+          amount.step = stepForUnit(nextUnit);
+          amount.value = formatAmountInputValue(nextAmount, nextUnit);
+          hasUnsavedAssetLiabilityChanges = true;
+          saveForm();
+          persistSnapshotForActiveSelection({ render: true, onlyIfDirty: true, trackAction: false });
+        });
+      });
+
+      name.addEventListener("keydown", (e) => {
+        if (e.key === "Tab" && !e.shiftKey) {
+          e.preventDefault();
+          unit.focus();
+        }
+      });
+
+      unit.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          amount.focus();
+          amount.select();
+          return;
+        }
+        if (e.key !== "Tab" || e.shiftKey) return;
+        e.preventDefault();
+        amount.focus();
+        amount.select();
+      });
+    }
+
+    const del = document.createElement("button");
+    del.className = "small-btn remove-btn";
+    del.textContent = "×";
+    del.title = "Remove";
+    del.addEventListener("click", () => removeRow(key, idx));
+
+    if (unit) {
+      wrap.append(name, unit, amount, del);
+    } else {
+      wrap.append(name, amount, del);
+    }
+    container.appendChild(wrap);
+
+    if (pendingRowFocus && pendingRowFocus.key === key && pendingRowFocus.idx === idx) {
+      setTimeout(() => {
+        name.focus();
+      }, 0);
+      pendingRowFocus = null;
+    }
+
+    if (pendingRowFieldFocus && pendingRowFieldFocus.key === key && pendingRowFieldFocus.idx === idx) {
+      const focusTarget = pendingRowFieldFocus;
+      pendingRowFieldFocus = null;
+      setTimeout(() => {
+        if (focusTarget.field === "unit") {
+          const unitEl = wrap.querySelector("select");
+          if (unitEl) unitEl.focus();
+        }
+      }, 0);
+    }
+  });
+
+  updateEditorDuplicateWarnings(container, key);
+}
+
+function updateEditorDuplicateWarnings(container, key) {
+  if (key !== "assets" && key !== "liabilities") return;
+  const rows = formState[key] || [];
+  const duplicates = duplicateRowIndices(rows);
+  const hasUnnamed = rows.some((r) => !canonicalRowName(r?.name));
+  const addBtn = document.querySelector(`.add-row-btn[data-target="${container.id}"]`);
+  if (addBtn) {
+    const blocked = duplicates.size > 0 || hasUnnamed;
+    addBtn.disabled = blocked;
+    addBtn.title = blocked
+      ? "Resolve duplicate or unnamed rows before adding more"
+      : (key === "assets" ? "Add Asset" : "Add Liability");
+  }
+  Array.from(container.children).forEach((wrap, idx) => {
+    const isDuplicate = duplicates.has(idx);
+    wrap.classList.toggle("row-editor-duplicate", isDuplicate);
+    const nameInput = wrap.querySelector(`input[data-row-key="${key}"]`);
+    if (nameInput) {
+      nameInput.classList.toggle("duplicate-row-name", false);
+      nameInput.title = "";
+    }
+    let warning = wrap.querySelector(".row-duplicate-warning");
+    if (isDuplicate && !warning) {
+      warning = document.createElement("span");
+      warning.className = "row-duplicate-warning";
+      warning.title = "Duplicated names are not allowed. Later duplicate rows are ignored until the duplication is resolved.";
+      wrap.appendChild(warning);
+    }
+    if (isDuplicate && warning && nameInput) {
+      warning.style.left = `${Math.max(2, nameInput.offsetLeft - 10)}px`;
+      warning.style.top = `${nameInput.offsetTop + Math.round(nameInput.offsetHeight / 2)}px`;
+    }
+    if (!isDuplicate && warning) {
+      warning.remove();
+    }
+  });
+}
+
+function renderHistoryTable() {
+  el.historyTableBody.innerHTML = "";
+  const today = mmddyy(new Date());
+  const historyRows = snapshots
+    .slice()
+    .sort((a, b) => parseMMDDYY(b.date) - parseMMDDYY(a.date));
+  if (!historyRows.some((s) => s.date === today)) {
+    const todaySnap = todayHistoryRowSnapshot();
+    if (todaySnap) {
+      historyRows.unshift(todaySnap);
+    }
+  }
+
+  historyRows.forEach((snap) => {
+    const tr = document.createElement("tr");
+    tr.classList.toggle("active-snapshot", snap.date === editingSnapshotDate);
+    tr.title = "Click to load and edit this snapshot";
+    tr.innerHTML = `
+      <td>${formatDisplayDate(snap.date)}</td>
+      <td>${formatUsd(snap.btcusd)}</td>
+      <td>${formatBtc(snap.totals.net_btc)}</td>
+      <td>${formatUsd(snap.totals.net_usd)}</td>
+      <td class="history-actions-cell"><button class="small-btn history-delete-btn" type="button" title="Delete snapshot" ${snap.synthetic ? 'style="visibility:hidden"' : ""}>×</button></td>
+    `;
+    tr.addEventListener("click", () => selectSnapshot(snap.date));
+    if (!snap.synthetic) {
+      const delBtn = tr.querySelector(".history-delete-btn");
+      if (delBtn) {
+        delBtn.addEventListener("click", (event) => {
+          event.stopPropagation();
+          deleteSnapshot(snap.date);
+        });
+      }
+    }
+    el.historyTableBody.appendChild(tr);
+  });
+  el.historyCount.textContent = `${snapshots.length} snapshot${snapshots.length === 1 ? "" : "s"}`;
+}
+
+function renderAll() {
+  const displayDate = formatDisplayDate(editingSnapshotDate);
+  const aCount = formState.assets.length;
+  const lCount = formState.liabilities.length;
+  el.assetsPanelTitle.textContent = `Assets on ${displayDate}`;
+  el.assetsCount.textContent = `${aCount} item${aCount === 1 ? "" : "s"}`;
+  el.liabilitiesPanelTitle.textContent = `Liabilities on ${displayDate}`;
+  el.liabilitiesCount.textContent = `${lCount} item${lCount === 1 ? "" : "s"}`;
+  renderEditor(el.assetsRows, "assets");
+  renderEditor(el.liabilitiesRows, "liabilities");
+
+  const today = mmddyy(new Date());
+  const isHistorical = editingSnapshotDate && editingSnapshotDate !== today;
+  const existingSnap = isHistorical ? snapshots.find((s) => s.date === editingSnapshotDate) : null;
+  const historicalPrice = existingSnap && Number(existingSnap.btcusd) > 0
+    ? Number(existingSnap.btcusd)
+    : (isHistorical && Number(historicalPrices[editingSnapshotDate]) > 0
+        ? Number(historicalPrices[editingSnapshotDate])
+        : null);
+  const displayPrice = historicalPrice !== null ? historicalPrice : activeBtcusd();
+  const snap = applyExclusionFilters(normalizedSnapshot(displayPrice), excludedAssets, excludedLiabilities, displayPrice);
+  const chartSnapshots = snapshotsForCharts(displayPrice);
+
+  const manualActive = isManualOverrideActive();
+  const manualDisplayValue = manualActive
+    ? Number(formState.manualBtcusd)
+    : Number(formState.btcusd || 0);
+  if (document.activeElement !== el.manualBtcusd) {
+    el.manualBtcusd.value = manualDisplayValue > 0 ? formatUsd(manualDisplayValue) : "";
+  }
+  el.quoteTime.textContent = manualActive
+    ? "Manual price override"
+    : (formState.btcusd ? `Updated · ${formatQuoteTimestamp(lastQuoteRefreshAt || new Date())}` : "No quote loaded");
+
+  el.assetsMetric.textContent = formatBtc(snap.totals.assets_btc);
+  el.assetsMetricUsd.textContent = formatUsd(snap.totals.assets_usd);
+  el.liabilitiesMetric.textContent = formatBtc(snap.totals.liabilities_btc);
+  el.liabilitiesMetricUsd.textContent = formatUsd(snap.totals.liabilities_usd);
+  el.netMetric.textContent = formatBtc(snap.totals.net_btc);
+  el.netMetricUsd.textContent = formatUsd(snap.totals.net_usd);
+
+  renderHistoryTable();
+  populateFilterDropdowns();
+  renderChartsOnly();
+}
+
+function computeTotals(assets, liabilities, btcusd) {
+  const p = Math.max(Number(btcusd) || 0, 1e-12);
+  const assetRows = (assets || []).map((a) => ({ name: a.name, amount: a.value, unit: a.unit }));
+  const liabilityRows = (liabilities || []).map((l) => ({ name: l.name, amount: l.value, unit: l.unit }));
+  const splitA = splitAssetRows(assetRows);
+  const splitL = splitLiabilityRows(liabilityRows);
+  const aB = splitA.assetsBtc; const aU = splitA.assetsUsd;
+  const lB = splitL.liabilitiesBtc; const lU = splitL.liabilitiesUsd;
+  Object.entries(aB).forEach(([n, v]) => { aU[n] = v * p; });
+  Object.entries(aU).forEach(([n, v]) => { aB[n] = v / p; });
+  Object.entries(lB).forEach(([n, v]) => { lU[n] = v * p; });
+  Object.entries(lU).forEach(([n, v]) => { lB[n] = v / p; });
+  const tAB = sum(Object.values(aB)); const tAU = sum(Object.values(aU));
+  const tLB = sum(Object.values(lB)); const tLU = sum(Object.values(lU));
+  return { assets_btc: tAB, assets_usd: tAU, liabilities_btc: tLB, liabilities_usd: tLU, net_btc: tAB - tLB, net_usd: tAU - tLU };
+}
+
+function applyExclusionFilters(snap, exclAssets, exclLiabs, priceOverride) {
+  if (!exclAssets?.size && !exclLiabs?.size) return snap;
+  const filteredA = exclAssets?.size ? (snap.assets || []).filter(a => !exclAssets.has(a.name)) : (snap.assets || []);
+  const filteredL = exclLiabs?.size ? (snap.liabilities || []).filter(l => !exclLiabs.has(l.name)) : (snap.liabilities || []);
+  const price = priceOverride !== undefined ? priceOverride : Number(snap.btcusd || 0);
+  return { ...snap, totals: computeTotals(filteredA, filteredL, price) };
+}
+
+function snapshotsForCharts(displayPrice, exclAssets, exclLiabs) {
+  const today = mmddyy(new Date());
+  const todayMs = parseMMDDYY(today).getTime();
+  const sorted = snapshots.slice().sort((a, b) => parseMMDDYY(a.date) - parseMMDDYY(b.date));
+  const hasEnteredFormRows = comparableRowsFromForm(formState.assets).length > 0 || comparableRowsFromForm(formState.liabilities).length > 0;
+
+  // No historical prices loaded yet — fall back to sparse snapshot list
+  if (Object.keys(historicalPrices).length === 0) {
+    const syntheticToday = todayHistoryRowSnapshot();
+    const baseList = sorted.some((s) => s.date === today)
+      ? sorted
+      : (syntheticToday && (sorted.length > 0 || hasEnteredFormRows))
+        ? [...sorted, syntheticToday].sort((a, b) => parseMMDDYY(a.date) - parseMMDDYY(b.date))
+        : sorted;
+    const list = baseList.map((s) => applyExclusionFilters({ ...s, totals: { ...s.totals } }, exclAssets, exclLiabs));
+    if (Number.isFinite(displayPrice) && displayPrice > 0 && isManualOverrideActive()) {
+      const live = applyExclusionFilters(normalizedSnapshot(displayPrice), exclAssets, exclLiabs, displayPrice);
+      const idx = list.findIndex((s) => s.date === today);
+      if (idx >= 0) list[idx] = live;
+      else { list.push(live); list.sort((a, b) => parseMMDDYY(a.date) - parseMMDDYY(b.date)); }
+    }
+    return list;
+  }
+
+  // If no saved snapshots, use the synthetic today row (current formState) so charts draw immediately
+  if (!sorted.length) {
+    if (!hasEnteredFormRows) return [];
+    const syntheticToday = todayHistoryRowSnapshot();
+    return syntheticToday ? [applyExclusionFilters(syntheticToday, exclAssets, exclLiabs)] : [];
+  }
+
+  // Pre-compute snapshot timestamps for efficient carry-forward lookup
+  const snapMs = sorted.map((s) => parseMMDDYY(s.date).getTime());
+  const result = [];
+  const cur = new Date(snapMs[0]);
+  let si = 0;
+
+  while (cur.getTime() <= todayMs) {
+    const curMs = cur.getTime();
+    // Advance pointer to last snapshot on or before cur
+    while (si + 1 < sorted.length && snapMs[si + 1] <= curMs) si++;
+    const snap = sorted[si];
+    const dateKey = mmddyy(cur);
+
+    let price;
+    if (dateKey === today) {
+      price = Number.isFinite(displayPrice) && displayPrice > 0 ? displayPrice : Number(snap.btcusd || 0);
+    } else {
+      price = historicalPrices[dateKey] || 0;
+      if (price <= 0) { cur.setDate(cur.getDate() + 1); continue; }
+    }
+    if (price <= 0) { cur.setDate(cur.getDate() + 1); continue; }
+
+    let totals;
+    if (dateKey === today && isManualOverrideActive()) {
+      const live = applyExclusionFilters(normalizedSnapshot(price), exclAssets, exclLiabs, price);
+      totals = live.totals;
+    } else {
+      const filteredA = exclAssets?.size ? (snap.assets || []).filter(a => !exclAssets.has(a.name)) : (snap.assets || []);
+      const filteredL = exclLiabs?.size ? (snap.liabilities || []).filter(l => !exclLiabs.has(l.name)) : (snap.liabilities || []);
+      totals = computeTotals(filteredA, filteredL, price);
+    }
+
+    result.push({ date: dateKey, btcusd: price, totals });
+    cur.setDate(cur.getDate() + 1);
+  }
+
+  return result;
+}
+
+function niceTicks(lo, hi, targetCount = 5) {
+  const range = hi - lo;
+  if (range === 0) return { ticks: [lo], step: 1 };
+  const roughStep = range / Math.max(targetCount - 1, 1);
+  const mag = Math.pow(10, Math.floor(Math.log10(roughStep)));
+  const norm = roughStep / mag;
+  let niceNorm;
+  if (norm <= 1) niceNorm = 1;
+  else if (norm <= 2) niceNorm = 2;
+  else if (norm <= 2.5) niceNorm = 2.5;
+  else if (norm <= 5) niceNorm = 5;
+  else niceNorm = 10;
+  const step = niceNorm * mag;
+  const tMin = Math.floor(lo / step) * step;
+  const tMax = Math.ceil(hi / step) * step;
+  const n = Math.round((tMax - tMin) / step);
+  const ticks = Array.from({ length: n + 1 }, (_, i) =>
+    Math.round((tMin + i * step) * 1e10) / 1e10
+  );
+  return { ticks, step };
+}
+
+function formatTickValue(v, step, isPercent) {
+  const absMag = step > 0 ? Math.floor(Math.log10(step)) : 0;
+  const isHalfStep = Math.abs((step / Math.pow(10, absMag)) - 2.5) < 1e-9;
+  const decimals = isHalfStep ? Math.max(0, 1 - absMag) : Math.max(0, -absMag);
+  return v.toFixed(decimals) + (isPercent ? '%' : '');
+}
+
+function thinDateTicks(candidates, maxTicks = 8) {
+  if (candidates.length <= maxTicks) return candidates;
+  const out = [];
+  const step = (candidates.length - 1) / (maxTicks - 1);
+  for (let i = 0; i < maxTicks; i++) {
+    out.push(candidates[Math.round(i * step)]);
+  }
+  return out.filter((t, i, arr) => i === 0 || t.i !== arr[i - 1].i);
+}
+
+function buildDateLabelTicks(labels, maxTicks = 8) {
+  if (!labels.length) return [];
+  const monthShort = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const parsed = labels.map((l) => (/^\d{6}$/.test(l) ? parseMMDDYY(l) : null));
+  if (parsed.some((d) => !d)) return [];
+
+  const n = labels.length;
+  const spanDays = Math.max(0, Math.round((parsed[n - 1].getTime() - parsed[0].getTime()) / 86400000));
+
+  if (spanDays <= 45) {
+    const tickCount = Math.min(maxTicks, n);
+    const ticks = [];
+    for (let k = 0; k < tickCount; k++) {
+      const i = tickCount === 1 ? 0 : Math.round((k * (n - 1)) / (tickCount - 1));
+      const d = parsed[i];
+      ticks.push({ i, text: `${d.getMonth() + 1}/${d.getDate()}` });
+    }
+    return ticks.filter((t, idx, arr) => idx === 0 || t.i !== arr[idx - 1].i);
+  }
+
+  if (spanDays <= 730) {
+    const monthStarts = [];
+    parsed.forEach((d, i) => {
+      if (d.getDate() === 1) {
+        monthStarts.push({ i, d });
+      }
+    });
+    if (!monthStarts.length) return [];
+
+    const allowedSteps = [1, 2, 3, 4, 6];
+    let chosenStep = 6;
+    for (const step of allowedSteps) {
+      const count = monthStarts.filter(({ d }) => ((d.getFullYear() * 12 + d.getMonth()) % step) === 0).length;
+      if (count > 0 && count <= maxTicks) {
+        chosenStep = step;
+        break;
+      }
+    }
+
+    const ticks = monthStarts
+      .filter(({ d }) => ((d.getFullYear() * 12 + d.getMonth()) % chosenStep) === 0)
+      .map(({ i, d }) => {
+        const month = d.getMonth();
+        return { i, text: month === 0 ? String(d.getFullYear()) : monthShort[month] };
+      });
+
+    return ticks;
+  }
+
+  const yearCandidates = [];
+  parsed.forEach((d, i) => {
+    if (d.getMonth() === 0 && d.getDate() === 1) {
+      yearCandidates.push({ i, text: String(d.getFullYear()) });
+    }
+  });
+  if (!yearCandidates.length || yearCandidates[0].i !== 0) {
+    yearCandidates.unshift({ i: 0, text: String(parsed[0].getFullYear()) });
+  }
+  if (yearCandidates[yearCandidates.length - 1].i !== n - 1) {
+    yearCandidates.push({ i: n - 1, text: String(parsed[n - 1].getFullYear()) });
+  }
+  return thinDateTicks(yearCandidates, maxTicks);
+}
+
+function formatChartTooltipValue(v, isPercent) {
+  if (isPercent) return `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
+  return Number(v).toFixed(6);
+}
+
+function drawLineChart(canvas, datasets, labels, opts = {}) {
+  const ctx = canvas.getContext("2d");
+  const width = canvas.width;
+  const height = canvas.height;
+  // Canvas buffer is kept in sync with display pixels by ResizeObserver,
+  // so font sizes in canvas pixels equal their intended CSS-pixel size.
+  const dpr = window.devicePixelRatio || 1;
+  const pad = {
+    l: Math.round(CHART_PAD.l * Math.min(1, Math.max(0.5, (width / dpr) / 900))),
+    r: CHART_PAD.r,
+    t: CHART_PAD.t,
+    b: CHART_PAD.b
+  };
+  const fs = (px) => px;
+  const canvasBg = themeValue("--canvas-bg") || "rgba(0,0,0,0.42)";
+  const chartTick = themeValue("--chart-tick") || "#a2a2a2";
+  const chartGrid = themeValue("--chart-grid") || "rgba(255,255,255,0.14)";
+  const chartAxis = themeValue("--chart-axis") || "rgba(255,255,255,0.28)";
+  const chartMarker = themeValue("--chart-marker") || "#f5f5f5";
+  const tooltipBg = themeValue("--chart-tooltip-bg") || "rgba(10,10,10,0.78)";
+  const tooltipBorder = themeValue("--chart-tooltip-border") || "rgba(255,255,255,0.18)";
+  const tooltipTitle = themeValue("--chart-tooltip-title") || "#f3f3f3";
+  const tooltipText = themeValue("--chart-tooltip-text") || "#d0d0d0";
+  const snapshotHighlightDot = themeValue("--snapshot-highlight-dot") || "#66b2ff";
+  const snapshotHighlightRing = themeValue("--snapshot-highlight-ring") || "rgba(102,178,255,0.22)";
+
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = canvasBg;
+  ctx.fillRect(0, 0, width, height);
+
+  const allValues = datasets.flatMap((d) => d.values);
+  if (!allValues.length) {
+    ctx.fillStyle = chartTick;
+    ctx.font = `${fs(30)}px Space Grotesk`;
+    ctx.fillText("No saved data yet. Add an asset or liability.", 28, 46);
+    return;
+  }
+
+  let dataMin = Math.min(...allValues);
+  let dataMax = Math.max(...allValues);
+  if (dataMin === dataMax) { dataMin -= 1; dataMax += 1; }
+  if (opts.minZero) dataMin = Math.min(0, dataMin);
+
+  const { ticks, step } = niceTicks(dataMin, dataMax, 5);
+  const min = ticks[0];
+  const max = ticks[ticks.length - 1];
+
+  const x0 = pad.l;
+  const y0 = height - pad.b;
+  const chartW = width - pad.l - pad.r;
+  const chartH = height - pad.t - pad.b;
+
+  ctx.strokeStyle = chartGrid;
+  ctx.lineWidth = 1;
+
+  ctx.fillStyle = chartTick;
+  ctx.font = `${fs(23)}px IBM Plex Mono`;
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+
+  ticks.forEach((tickVal) => {
+    const y = pad.t + ((max - tickVal) / (max - min)) * chartH;
+    ctx.beginPath();
+    ctx.moveTo(x0, y);
+    ctx.lineTo(x0 + chartW, y);
+    ctx.stroke();
+
+    const yTickLabel = opts.yTickFormatter
+      ? opts.yTickFormatter(tickVal, step)
+      : formatTickValue(tickVal, step, Boolean(opts.percent)) + (opts.percent ? "" : (opts.yTickSuffix || ""));
+    ctx.fillText(yTickLabel, x0 - 10, y + 1);
+  });
+
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+
+  ctx.strokeStyle = chartAxis;
+  ctx.beginPath();
+  ctx.moveTo(x0, pad.t);
+  ctx.lineTo(x0, y0);
+  ctx.lineTo(x0 + chartW, y0);
+  ctx.stroke();
+
+  const labelToIndex = new Map(labels.map((d, i) => [d, i]));
+  const markerDates = Array.isArray(opts.historyMarkerDates) ? opts.historyMarkerDates : [];
+  const markerIndices = markerDates
+    .map((d) => labelToIndex.get(d))
+    .filter((i) => Number.isInteger(i));
+  const seenMarker = new Set();
+  ctx.fillStyle = chartMarker;
+  markerIndices.forEach((i) => {
+    if (seenMarker.has(i)) return;
+    seenMarker.add(i);
+    const x = chartXAtIndex(i, labels.length, x0, chartW);
+    ctx.beginPath();
+    ctx.arc(x, y0, 4, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  if (opts.selectedHistoryDate && labelToIndex.has(opts.selectedHistoryDate)) {
+    const i = labelToIndex.get(opts.selectedHistoryDate);
+    const x = chartXAtIndex(i, labels.length, x0, chartW);
+    // Large dot at the baseline behind the history marker for the selected date.
+    ctx.fillStyle = snapshotHighlightRing;
+    ctx.beginPath();
+    ctx.arc(x, y0, 14, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = snapshotHighlightDot;
+    ctx.beginPath();
+    ctx.arc(x, y0, 6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  if (opts.hoveredHistoryDate && labelToIndex.has(opts.hoveredHistoryDate)) {
+    const i = labelToIndex.get(opts.hoveredHistoryDate);
+    const x = chartXAtIndex(i, labels.length, x0, chartW);
+
+    ctx.strokeStyle = tooltipBorder;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x, pad.t);
+    ctx.lineTo(x, y0);
+    ctx.stroke();
+  }
+
+  // Draw lines in reverse order so dataset[0] (BTC) renders on top.
+  datasets.slice().reverse().forEach((ds, revIdx) => {
+    const idx = datasets.length - 1 - revIdx;
+    ctx.strokeStyle = ds.color || COLORS[idx % COLORS.length];
+    ctx.lineWidth = 3;
+    if (labels.length > 1) {
+      ctx.beginPath();
+      ds.values.forEach((v, i) => {
+        const x = chartXAtIndex(i, labels.length, x0, chartW);
+        const y = pad.t + ((max - v) / (max - min)) * chartH;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    } else if (ds.values.length === 1) {
+      // Single point: render a centered scatter marker instead of a degenerate line.
+      const x = chartXAtIndex(0, labels.length, x0, chartW);
+      const y = pad.t + ((max - ds.values[0]) / (max - min)) * chartH;
+      ctx.fillStyle = ds.color || COLORS[idx % COLORS.length];
+      ctx.beginPath();
+      ctx.arc(x, y, 5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  });
+
+  // Draw legend in original order so labels match tooltip ordering.
+  datasets.forEach((ds, idx) => {
+    const lx = x0 + 10;
+    const ly = pad.t + 26 + idx * 26;
+    ctx.fillStyle = ds.color || COLORS[idx % COLORS.length];
+    ctx.fillRect(lx, ly - 10, 18, 3);
+    ctx.fillStyle = tooltipText;
+    ctx.font = `${fs(23)}px Space Grotesk`;
+    ctx.fillText(ds.label, lx + 26, ly);
+  });
+
+  // Draw tooltip on top of everything.
+  if (opts.hoveredHistoryDate && labelToIndex.has(opts.hoveredHistoryDate)) {
+    const i = labelToIndex.get(opts.hoveredHistoryDate);
+    const x = chartXAtIndex(i, labels.length, x0, chartW);
+
+    // lines: array of segment arrays [{text, color}]
+    const lines = [[{ text: formatDisplayDate(opts.hoveredHistoryDate), color: tooltipTitle }]];
+    datasets.forEach((ds) => {
+      const val = Number(ds.values[i] || 0);
+      const dsColor = ds.color || tooltipText;
+      if (ds.rawValues && ds.rawFormatter) {
+        const rawStr = ds.rawFormatter(ds.rawValues[i]);
+        const pctStr = formatChartTooltipValue(val, true);
+        const pctColor = val >= 0 ? "#39d7a4" : "#ff5555";
+        lines.push([
+          { text: `${rawStr} `, color: dsColor },
+          { text: pctStr, color: pctColor }
+        ]);
+      } else {
+        const pctStr = formatChartTooltipValue(val, Boolean(opts.percent));
+        const pctColor = val >= 0 ? "#39d7a4" : "#ff5555";
+        const valColor = opts.percent ? pctColor : dsColor;
+        const valStr = ds.valueFormatter ? ds.valueFormatter(val) : pctStr;
+        lines.push([{ text: valStr, color: valColor }]);
+      }
+    });
+
+    ctx.font = `${fs(26)}px IBM Plex Mono`;
+    const textW = Math.max(...lines.map((segs) => segs.reduce((w, s) => w + ctx.measureText(s.text).width, 0)));
+    const boxW = textW + 16;
+    const boxH = lines.length * 28 + 14;
+    let boxX = x + 10;
+    if (boxX + boxW > x0 + chartW) boxX = x - boxW - 10;
+    const cursorY = (opts.hoverY != null) ? opts.hoverY : (pad.t + chartH / 2);
+    const boxY = Math.max(pad.t, cursorY - boxH - 14);
+
+    ctx.fillStyle = tooltipBg;
+    ctx.strokeStyle = tooltipBorder;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.rect(boxX, boxY, boxW, boxH);
+    ctx.fill();
+    ctx.stroke();
+
+    lines.forEach((segs, li) => {
+      let xOff = boxX + 8;
+      segs.forEach((seg) => {
+        ctx.fillStyle = seg.color;
+        ctx.fillText(seg.text, xOff, boxY + 26 + li * 28);
+        xOff += ctx.measureText(seg.text).width;
+      });
+    });
+  }
+
+  let xTicks = buildDateLabelTicks(labels, 8);
+  if (!xTicks.length) {
+    const xEvery = Math.max(1, Math.floor(labels.length / 6));
+    xTicks = labels
+      .map((label, i) => ({ label, i }))
+      .filter((p) => p.i % xEvery === 0 || p.i === labels.length - 1)
+      .map((p) => ({ i: p.i, text: p.label }));
+  }
+
+  ctx.fillStyle = chartTick;
+  ctx.font = `${fs(23)}px IBM Plex Mono`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  xTicks.forEach((tick) => {
+    const x = chartXAtIndex(tick.i, labels.length, x0, chartW);
+    ctx.fillText(tick.text, x, y0 + 12);
+  });
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+}
+
+function formatSatsCompact(sats) {
+  if (sats === 0) return "0 sats";
+  const abs = Math.abs(sats);
+  if (abs >= 1e9) return (sats / 1e9).toFixed(Number.isInteger(sats / 1e9) ? 0 : 1) + "B sats";
+  if (abs >= 1e6) return (sats / 1e6).toFixed(Number.isInteger(sats / 1e6) ? 0 : 1) + "M sats";
+  if (abs >= 1e3) return (sats / 1e3).toFixed(Number.isInteger(sats / 1e3) ? 0 : 1) + "k sats";
+  return sats + " sats";
+}
+
+function renderAssetLiabilityChart(chartSnapshots = snapshots) {
+  const shouldSuppressZeroPoints = excludedAssets.size > 0 || excludedLiabilities.size > 0;
+  const plottedSnapshots = shouldSuppressZeroPoints
+    ? chartSnapshots.filter((s) => {
+        const assetsBtc = Number(s.totals?.assets_btc || 0);
+        const liabilitiesBtc = Number(s.totals?.liabilities_btc || 0);
+        return assetsBtc !== 0 || liabilitiesBtc !== 0;
+      })
+    : chartSnapshots;
+
+  if (!plottedSnapshots.length) {
+    chartInteractionState.alChart = { labels: [], markerDates: [] };
+    drawLineChart(el.alChart, [], []);
+    return;
+  }
+
+  const allBtcValues = plottedSnapshots.flatMap((s) => [
+    Number(s.totals?.assets_btc || 0),
+    Number(s.totals?.liabilities_btc || 0)
+  ]);
+  const maxBtcVal = Math.max(...allBtcValues.map(Math.abs), 0);
+  // Use sats display when max value is below 0.001 BTC (100,000 sats)
+  const useSats = maxBtcVal > 0 && maxBtcVal < 0.001;
+
+  const labels = plottedSnapshots.map((s) => s.date);
+  const markerDates = historyDatesIncludingToday().filter((d) => labels.includes(d));
+  chartInteractionState.alChart = { labels, markerDates };
+  const datasets = [
+    {
+      label: "Total Assets",
+      color: "#39d7a4",
+      values: plottedSnapshots.map((s) => Number(s.totals?.assets_btc || 0)),
+      valueFormatter: useSats
+        ? (v) => `${Math.round(Number(v) * 1e8).toLocaleString()} sats`
+        : (v) => `${Number(v).toFixed(8)} BTC`
+    },
+    {
+      label: "Total Liabilities",
+      color: "#ff6f86",
+      values: plottedSnapshots.map((s) => Number(s.totals?.liabilities_btc || 0)),
+      valueFormatter: useSats
+        ? (v) => `${Math.round(Number(v) * 1e8).toLocaleString()} sats`
+        : (v) => `${Number(v).toFixed(8)} BTC`
+    }
+  ];
+
+  drawLineChart(el.alChart, datasets, labels, {
+    minZero: true,
+    historyMarkerDates: markerDates,
+    selectedHistoryDate: editingSnapshotDate,
+    hoveredHistoryDate: hoveredSnapshotDate,
+    hoverY: hoveredCanvasY,
+    ...(useSats
+      ? { yTickFormatter: (v) => formatSatsCompact(Math.round(v * 1e8)) }
+      : { yTickSuffix: " BTC" })
+  });
+}
+
+function renderNetChangeChart(chartSnapshots = snapshots) {
+  const plottedSnapshots = chartSnapshots.filter((s) => {
+    const assetsBtc = Number(s.totals?.assets_btc || 0);
+    const liabilitiesBtc = Number(s.totals?.liabilities_btc || 0);
+    return assetsBtc !== 0 || liabilitiesBtc !== 0;
+  });
+
+  if (!plottedSnapshots.length) {
+    chartInteractionState.netChart = { labels: [], markerDates: [] };
+    drawLineChart(el.netChart, [], []);
+    return;
+  }
+
+  const labels = plottedSnapshots.map((s) => s.date);
+  const markerDates = historyDatesIncludingToday().filter((d) => labels.includes(d));
+  chartInteractionState.netChart = { labels, markerDates };
+  const baseUsd = Number(plottedSnapshots[0].totals.net_usd) || 1e-12;
+  const baseBtc = Number(plottedSnapshots[0].totals.net_btc) || 1e-12;
+
+  const usdChanges = plottedSnapshots.map((s) => ((Number(s.totals.net_usd) - baseUsd) / baseUsd) * 100);
+  const btcChanges = plottedSnapshots.map((s) => ((Number(s.totals.net_btc) - baseBtc) / baseBtc) * 100);
+  const usdRaw = plottedSnapshots.map((s) => Number(s.totals.net_usd));
+  const btcRaw = plottedSnapshots.map((s) => Number(s.totals.net_btc));
+
+  const datasets = [
+    { label: "BTC Net Worth", color: "#f7931a", values: btcChanges, rawValues: btcRaw, rawFormatter: formatBtc },
+    {
+      label: "USD Net Worth",
+      color: themeValue("--networth-usd-line") || "#d7dde3",
+      values: usdChanges,
+      rawValues: usdRaw,
+      rawFormatter: formatUsd
+    }
+  ];
+
+  drawLineChart(el.netChart, datasets, labels, {
+    percent: true,
+    historyMarkerDates: markerDates,
+    selectedHistoryDate: editingSnapshotDate,
+    hoveredHistoryDate: hoveredSnapshotDate,
+    hoverY: hoveredCanvasY
+  });
+}
+
+function parseCsvRow(line) {
+  const fields = [];
+  let i = 0;
+  while (i < line.length) {
+    if (line[i] === '"') {
+      i++;
+      let field = '';
+      while (i < line.length) {
+        if (line[i] === '"' && line[i + 1] === '"') {
+          field += '"';
+          i += 2;
+        } else if (line[i] === '"') {
+          i++;
+          break;
+        } else {
+          field += line[i++];
+        }
+      }
+      if (line[i] === ',') i++;
+      fields.push(field);
+    } else {
+      const end = line.indexOf(',', i);
+      if (end === -1) {
+        fields.push(line.slice(i));
+        i = line.length;
+      } else {
+        fields.push(line.slice(i, end));
+        i = end + 1;
+      }
+    }
+  }
+  return fields;
+}
+
+function parseCsv(text) {
+  const lines = text.trim().split('\n').filter((l) => l.trim());
+  const headers = parseCsvRow(lines[0]);
+  return lines.slice(1).map((line) => {
+    const values = parseCsvRow(line);
+    const obj = {};
+    headers.forEach((h, i) => { obj[h.trim()] = values[i] ?? ''; });
+    return obj;
+  });
+}
+
+async function fetchHistoricalPrices() {
+  try {
+    const res = await fetch(HIST_PRICE_URL, { cache: 'no-cache' });
+    if (!res.ok) return;
+    const text = await res.text();
+    // Some rows have the ISO datetime split across two lines; join continuations
+    const rawLines = text.split('\n');
+    const fullLines = [];
+    for (const rawLine of rawLines) {
+      const t = rawLine.trim();
+      if (!t) continue;
+      if (/^\d+\/\d+\/\d+/.test(t)) {
+        fullLines.push(t);
+      } else if (fullLines.length > 0) {
+        fullLines[fullLines.length - 1] += ',' + t;
+      }
+    }
+    const prices = {};
+    for (const line of fullLines) {
+      const parts = line.split(',');
+      const dateStr = parts[0].trim(); // M/D/YY
+      const slash = dateStr.split('/');
+      if (slash.length !== 3) continue;
+      const [m, d, yy] = slash;
+      const key = m.padStart(2, '0') + d.padStart(2, '0') + yy.padStart(2, '0');
+      // Find first positive numeric field after date and ISO datetime columns
+      let price = 0;
+      for (let i = 2; i < parts.length; i++) {
+        const v = Number(parts[i].trim());
+        if (Number.isFinite(v) && v > 0) { price = v; break; }
+      }
+      if (price > 0) prices[key] = price;
+    }
+    historicalPrices = prices;
+  } catch (e) {
+    console.warn('Could not fetch historical prices:', e);
+  }
+}
+
+function updateModeToggleUI() {
+  document.getElementById("modeDemoBtn").classList.toggle("active", currentMode === "demo");
+  document.getElementById("modeLiveBtn").classList.toggle("active", currentMode === "live");
+  const isLive = currentMode === "live";
+  // Show encryption toggle only in live mode
+  if (el.encryptionToggleWrap) {
+    el.encryptionToggleWrap.classList.toggle("visible", isLive);
+  }
+  if (el.liveEncryptionEnabled) {
+    el.liveEncryptionEnabled.checked = liveEncryptionEnabled;
+  }
+  const isLiveLocked = isLive && liveAccessLocked;
+  if (el.liveEncryptionEnabled) {
+    el.liveEncryptionEnabled.disabled = isLiveLocked;
+  }
+  // Show file selector in live mode; disable interactions if server is unavailable.
+  if (el.liveFileWrap) {
+    el.liveFileWrap.classList.toggle("visible", isLive);
+    if (el.liveFileBtn) {
+      el.liveFileBtn.disabled = !serverAvailable;
+      el.liveFileBtn.title = serverAvailable ? "Choose history file" : "Start local server to manage history files";
+    }
+    if (el.liveFileCreateBtn) {
+      el.liveFileCreateBtn.disabled = !serverAvailable || isLiveLocked;
+    }
+    if (isLive) {
+      void populateLiveFileMenu();
+    } else {
+      closeLiveFileDropdown();
+    }
+  }
+
+  const lockableSelectors = [
+    "#refreshQuoteBtn",
+    "#manualBtcusd",
+    "#chartStartDateBtn",
+    "#chartEndDateBtn",
+    "#assetsFilterBtn",
+    "#liabilitiesFilterBtn",
+    ".add-row-btn",
+    ".small-btn",
+    "#assetsRows input",
+    "#assetsRows select",
+    "#liabilitiesRows input",
+    "#liabilitiesRows select"
+  ];
+  lockableSelectors.forEach((selector) => {
+    document.querySelectorAll(selector).forEach((node) => {
+      node.disabled = Boolean(isLiveLocked);
+    });
+  });
+}
+
+// Try to decrypt and load live encrypted data. Returns true on success.
+async function unlockLiveEncryptedData(password) {
+  const encSnap = localStorage.getItem(STORE_KEY_LIVE_ENC);
+  const encForm = localStorage.getItem(FORM_KEY_LIVE_ENC);
+  const defaultForm = DEFAULT_FORM_LIVE;
+  try {
+    if (encSnap) {
+      const plain = await decryptText(encSnap, password);
+      snapshots = parseSnapshotsRaw(plain);
+    } else {
+      snapshots = [];
+    }
+    if (encForm) {
+      const plain = await decryptText(encForm, password);
+      formState = parseFormFromRaw(plain, defaultForm);
+    } else {
+      formState = structuredClone(defaultForm);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function enableLiveEncryption() {
+  // Always prompt for a new password with confirm when encrypting a CSV file.
+  const encFilename = liveHistoryFile.replace(/\.(csv|enc)$/, "") + ".enc";
+  const pw = await promptForPassword({ confirm: true, message: `Set a password for ${encFilename}.` });
+  if (!pw) { el.liveEncryptionEnabled.checked = false; return; }
+  liveEncryptionPassword = pw;
+  liveEncryptionEnabled = true;
+  liveHistoryFile = encFilename;
+  liveFilePasswords.set(liveHistoryFile, liveEncryptionPassword);
+  localStorage.setItem(LIVE_ENCRYPTION_ENABLED_KEY, "1");
+  localStorage.setItem(LIVE_HISTORY_FILE_KEY, liveHistoryFile);
+  // Encrypt and write the file; remove plaintext copies
+  const csv = snapshotsToCsv(snapshots);
+  const enc = await encryptText(csv, liveEncryptionPassword);
+  localStorage.setItem(STORE_KEY_LIVE_ENC, enc);
+  localStorage.removeItem(STORE_KEY_LIVE);
+  localStorage.removeItem(FORM_KEY_LIVE);
+  await writeLiveHistoryFile(enc, true);
+  await populateLiveFileMenu();
+  updateModeToggleUI();
+}
+
+async function disableLiveEncryption() {
+  // Always require password confirmation before decrypting and converting
+  const hasEncFile = serverAvailable && (await fetchLiveHistoryFile()) !== null && liveHistoryFile.endsWith(".enc");
+  const pw = await promptForPassword({
+    confirm: false,
+    message: "Enter your encryption password to decrypt and disable encryption.",
+    validator: async (p) => {
+      if (hasEncFile) {
+        try {
+          const raw = await fetchLiveHistoryFile();
+          const plain = await decryptText(raw, p);
+          snapshots = parseLiveHistoryCsv(plain);
+          return null;
+        } catch {
+          return "Incorrect password. Please try again.";
+        }
+      } else {
+        const ok = await unlockLiveEncryptedData(p);
+        return ok ? null : "Incorrect password. Please try again.";
+      }
+    }
+  });
+  if (!pw) {
+    el.liveEncryptionEnabled.checked = true;
+    return;
+  }
+  liveEncryptionPassword = pw;
+  const csvFilename = liveHistoryFile.replace(/\.(csv|enc)$/, "") + ".csv";
+  const csv = snapshotsToCsv(snapshots);
+  liveHistoryFile = csvFilename;
+  localStorage.setItem(LIVE_HISTORY_FILE_KEY, liveHistoryFile);
+  await writeLiveHistoryFile(csv, false);
+  localStorage.setItem(STORE_KEY_LIVE, JSON.stringify(snapshots));
+  localStorage.setItem(FORM_KEY_LIVE, JSON.stringify(formState));
+  localStorage.removeItem(STORE_KEY_LIVE_ENC);
+  localStorage.removeItem(FORM_KEY_LIVE_ENC);
+  liveEncryptionEnabled = false;
+  liveEncryptionPassword = null;
+  localStorage.setItem(LIVE_ENCRYPTION_ENABLED_KEY, "0");
+  await populateLiveFileMenu();
+  updateModeToggleUI();
+}
+
+async function switchMode(newMode) {
+  if (newMode === currentMode) return;
+
+  currentMode = newMode;
+  localStorage.setItem(MODE_KEY, currentMode);
+  hoveredSnapshotDate = null;
+  chartRange = { startDate: null, endDate: null };
+  netChartRange = { startDate: null, endDate: null };
+  alChartRange = { startDate: null, endDate: null };
+  el.chartStartDate.value = "";
+  el.chartEndDate.value = "";
+  editingSnapshotDate = mmddyy(new Date());
+  hasUnsavedAssetLiabilityChanges = false;
+  loadFilters(currentMode);
+
+  if (currentMode === "live") {
+    await probeServer();
+    updateModeToggleUI();
+    formState = loadForm();
+    if (serverAvailable) {
+      await ensureLiveBaseFileIfMissing();
+      if (liveHistoryFile.endsWith(".enc") && !liveEncryptionPassword) {
+        const pw = await promptForPassword({
+          confirm: false,
+          message: `Enter password for ${liveHistoryFile}.`,
+          validator: async (p) => {
+            try {
+              const raw = await fetchLiveHistoryFile();
+              if (!raw) return "Could not read file from server.";
+              await decryptText(raw, p); // throws on wrong password
+              return null;
+            } catch { return "Incorrect password. Please try again."; }
+          }
+        });
+        if (!pw) {
+          setLiveAccessLocked();
+          return;
+        }
+        liveEncryptionPassword = pw;
+        liveFilePasswords.set(liveHistoryFile, pw);
+      }
+      const loaded = await loadLiveSnapshotsFromServer();
+      snapshots = loaded;
+    } else if (liveEncryptionEnabled) {
+      const hasEncData = Boolean(localStorage.getItem(STORE_KEY_LIVE_ENC));
+      if (hasEncData && liveEncryptionPassword) {
+        const ok = await unlockLiveEncryptedData(liveEncryptionPassword);
+        if (!ok) {
+          // Session password no longer valid — fall back to demo
+          currentMode = "demo";
+          localStorage.setItem(MODE_KEY, currentMode);
+          resetDemoState();
+          snapshots = [];
+          formState = freshFormState("demo");
+        }
+      } else if (hasEncData) {
+        const pw = await promptForPassword({
+          confirm: false,
+          validator: async (p) => {
+            const ok = await unlockLiveEncryptedData(p);
+            return ok ? null : "Incorrect password. Please try again.";
+          }
+        });
+        if (pw) {
+          liveEncryptionPassword = pw;
+        } else {
+          // Cancelled — revert to demo mode
+          currentMode = "demo";
+          localStorage.setItem(MODE_KEY, currentMode);
+          resetDemoState();
+          snapshots = [];
+          formState = freshFormState("demo");
+        }
+      } else {
+        snapshots = loadSnapshots();
+      }
+    } else {
+      snapshots = loadSnapshots();
+    }
+  } else {
+    // Switching to demo — clear session password so re-auth is required on return.
+    liveEncryptionPassword = null;
+    resetDemoState();
+    snapshots = [];
+    formState = freshFormState("demo");
+  }
+
+  seedTodayFormStateFromHistory({ save: true });
+  formState.useManualBtcusd = false;
+  formState.manualBtcusd = null;
+  renderAll();
+  if (currentMode === "demo") {
+    await loadDemoData();
+    // Final guard: ensure charts are not constrained by any previous live range.
+    chartRange = { startDate: null, endDate: null };
+    el.chartStartDate.value = "";
+    el.chartEndDate.value = "";
+    renderChartsOnly();
+  }
+  updateModeToggleUI();
+}
+
+async function loadDemoData() {
+  try {
+    const response = await fetch('history_files/demo_history.csv', { cache: 'no-cache' });
+    if (!response.ok) return;
+    const text = await response.text();
+    const rows = parseCsv(text);
+    snapshots = rows.map((row) => {
+      const yyyymmddDate = String(row.date).trim();
+      const mmddyyDate = yyyymmddToMMDDYY(yyyymmddDate);
+      const btcusd = Number(historicalPrices[mmddyyDate] || formState.btcusd || 0);
+      const assets = JSON.parse(row.assets);
+      const liabilities = JSON.parse(row.liabilities);
+
+      return {
+        date: mmddyyDate,
+        timestamp: parseMMDDYY(mmddyyDate).toISOString(),
+        btcusd,
+        assets,
+        liabilities,
+        totals: computeTotals(assets, liabilities, btcusd)
+      };
+    });
+    editingSnapshotDate = mmddyy(new Date());
+    hasUnsavedAssetLiabilityChanges = false;
+    seedTodayFormStateFromHistory({ save: true });
+    saveSnapshots();
+    // Reset chart range so loading fresh demo data always shows the full history span.
+    chartRange = { startDate: null, endDate: null };
+    renderAll();
+  } catch (e) {
+    console.warn('Could not load demo data:', e);
+  }
+}
+
+function toCsv(rows, headers) {
+  const escape = (v) => {
+    const s = String(v ?? "");
+    if (s.includes(",") || s.includes("\"") || s.includes("\n")) {
+      return `"${s.replaceAll("\"", "\"\"")}"`;
+    }
+    return s;
+  };
+
+  const lines = [headers.join(",")];
+  rows.forEach((row) => {
+    lines.push(headers.map((h) => escape(row[h])).join(","));
+  });
+  return lines.join("\n");
+}
+
+function download(filename, content, mime = "text/csv;charset=utf-8") {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function exportNetWorthCsv() {
+  const rows = snapshots.map((s) => ({
+    date: s.date,
+    usd: Number(s.totals.net_usd).toFixed(2),
+    btc: Number(s.totals.net_btc).toFixed(8)
+  }));
+  const csv = toCsv(rows, ["date", "usd", "btc"]);
+  download("total_net_worth_usd_vs_btc.csv", csv);
+}
+
+function exportHistoricCsv() {
+  const sorted = snapshots.slice().sort((a, b) => parseMMDDYY(b.date) - parseMMDDYY(a.date));
+  const rows = sorted.map((s) => ({
+    date: s.date,
+    assets: JSON.stringify(s.assets || []),
+    liabilities: JSON.stringify(s.liabilities || [])
+  }));
+  const csv = toCsv(rows, ["date", "assets", "liabilities"]);
+  download("historic_net_worth.csv", csv);
+}
