@@ -24,6 +24,7 @@
   --chart-tooltip-border: rgba(255, 255, 255, 0.18);
   --chart-tooltip-title: #f3f3f3;
   --chart-tooltip-text: #d0d0d0;
+  --pie-slice-divider: #000000;
   --snapshot-highlight-bg: rgba(76, 163, 255, 0.2);
   --snapshot-highlight-border: rgba(76, 163, 255, 0.55);
   --snapshot-highlight-dot: #66b2ff;
@@ -59,6 +60,7 @@ body.light-theme {
   --chart-tooltip-border: rgba(0, 0, 0, 0.12);
   --chart-tooltip-title: #111111;
   --chart-tooltip-text: #404040;
+  --pie-slice-divider: #ffffff;
   --snapshot-highlight-bg: rgba(44, 127, 255, 0.18);
   --snapshot-highlight-border: rgba(44, 127, 255, 0.42);
   --snapshot-highlight-dot: #2f6dff;
@@ -732,7 +734,61 @@ body.light-theme .filter-checkbox-item:hover {
 }
 
 .metric-card {
-  padding: 14px;
+  padding: 0 8px 6px 12px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+}
+
+.metric-card-content {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 2px;
+  width: 100%;
+}
+
+.metric-card-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  margin-top: 12px;
+}
+
+.metric-card-chart {
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  width: 75px;
+  height: 75px;
+  margin-top: 6px;
+  margin-right: 2px;
+}
+
+.metric-pie-chart {
+  display: block;
+  cursor: pointer;
+  user-select: none;
+  width: 100%;
+  height: 100%;
+}
+
+.metric-pie-tooltip {
+  position: fixed;
+  z-index: 10000;
+  display: none;
+  background: var(--chart-tooltip-bg);
+  border: 1px solid var(--chart-tooltip-border);
+  color: var(--chart-tooltip-text);
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 }
 
 .metric-card .sub {

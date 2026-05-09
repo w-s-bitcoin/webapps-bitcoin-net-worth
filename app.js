@@ -9,6 +9,7 @@ const STORE_KEY_LIVE_ENC = "bitcoinNetWorthTrackerSnapshotsLiveEncV1";
 const FORM_KEY_LIVE_ENC = "bitcoinNetWorthTrackerFormLiveEncV1";
 const LIVE_ENCRYPTION_ENABLED_KEY = "bitcoinNetWorthTrackerLiveEncryptionEnabledV1";
 const LIVE_HISTORY_FILE_KEY = "bitcoinNetWorthTrackerLiveFileV1";
+const LIVE_LAST_VIEWED_FILE_KEY = "bitcoinNetWorthTrackerLastViewedLiveFileV1";
 const MODE_KEY = "bitcoinNetWorthTrackerModeV1";
 const THEME_KEY = "bitcoinNetWorthTrackerThemeV1";
 const BTCUSD_CACHE_KEY = "bitcoinNetWorthTrackerBtcusdCacheV1";
@@ -107,7 +108,9 @@ let hoveredSnapshotDate = null;
 let hoveredCanvasY = null;
 let liveEncryptionEnabled = localStorage.getItem(LIVE_ENCRYPTION_ENABLED_KEY) === "1";
 let liveEncryptionPassword = null; // session-only, never persisted
-let liveHistoryFile = localStorage.getItem(LIVE_HISTORY_FILE_KEY) || (liveEncryptionEnabled ? "my_history.enc" : "my_history.csv");
+let liveHistoryFile = localStorage.getItem(LIVE_HISTORY_FILE_KEY)
+  || localStorage.getItem(LIVE_LAST_VIEWED_FILE_KEY)
+  || "my_history.csv";
 let liveAccessLocked = false;
 const liveFilePasswords = new Map(); // filename -> password (session-only)
 let chartRange = { startDate: null, endDate: null };
@@ -116,6 +119,13 @@ let excludedLiabilities = new Set();
 
 function filterKeyForMode(mode) {
   return mode === "live" ? FILTER_KEY_LIVE : FILTER_KEY_DEMO;
+}
+
+function persistLiveFileSelection(file, { setCurrent = true } = {}) {
+  const normalized = String(file || "").trim();
+  if (!normalized) return;
+  localStorage.setItem(LIVE_LAST_VIEWED_FILE_KEY, normalized);
+  if (setCurrent) localStorage.setItem(LIVE_HISTORY_FILE_KEY, normalized);
 }
 
 function saveFilters(mode) {
@@ -142,6 +152,11 @@ const chartInteractionState = {
   alChart: { labels: [], markerDates: [] },
   netChart: { labels: [], markerDates: [] }
 };
+let metricPieChartState = {
+  netWorth: { hoveredIndex: null, slices: [] },
+  assets: { hoveredIndex: null, slices: [] },
+  liabilities: { hoveredIndex: null, slices: [] }
+};
 const MAX_ACTION_HISTORY = 200;
 let undoStack = [];
 let redoStack = [];
@@ -156,19 +171,29 @@ let pendingQuoteUiUpdate = false;
 let pendingBackgroundQuoteRefresh = false;
 let editorRowsFocused = false;
 let lastQuoteRefreshAt = null;
+let suppressNextEditorFocusRestore = false;
 
 if (currentMode === "demo") {
-  resetDemoState();
   formState = freshFormState("demo");
-  snapshots = [];
   editingSnapshotDate = mmddyy(new Date());
+}
+
+// Initial encrypted-live boot should render a blank dashboard until unlocked.
+if (currentMode === "live" && liveEncryptionEnabled && !liveEncryptionPassword) {
+  snapshots = [];
+  formState = freshFormState("live");
+  editingSnapshotDate = mmddyy(new Date());
+  hasUnsavedAssetLiabilityChanges = false;
+  hoveredSnapshotDate = null;
 }
 
 // Always start on the real price source; manual field will be populated from real price after first fetch.
 formState.useManualBtcusd = false;
 formState.manualBtcusd = null;
 editingSnapshotDate = mmddyy(new Date());
-seedTodayFormStateFromHistory({ save: false });
+if (!(currentMode === "live" && liveEncryptionEnabled && !liveEncryptionPassword)) {
+  seedTodayFormStateFromHistory({ save: false });
+}
 loadFilters(currentMode);
 
 const el = {
@@ -230,6 +255,21 @@ function syncEditorRowsFocusedFromDom() {
   const wasInAssets = Boolean(el.assetsRows && el.assetsRows.contains(active));
   const wasInLiabilities = Boolean(el.liabilitiesRows && el.liabilitiesRows.contains(active));
   editorRowsFocused = wasInAssets || wasInLiabilities;
+}
+
+function focusBodyWithoutScroll() {
+  const prevTabIndex = document.body.getAttribute("tabindex");
+  document.body.setAttribute("tabindex", "-1");
+  try {
+    document.body.focus({ preventScroll: true });
+  } catch {
+    document.body.focus();
+  }
+  if (prevTabIndex === null) {
+    document.body.removeAttribute("tabindex");
+  } else {
+    document.body.setAttribute("tabindex", prevTabIndex);
+  }
 }
 
 function initEditorFocusTracking() {
@@ -763,6 +803,89 @@ updateUndoRedoButtons();
   [el.alChart, el.netChart].forEach((c) => ro.observe(c));
   // Initial sync on first frame
   requestAnimationFrame(syncCanvasSizes);
+}());
+
+// ── Metric Pie Chart Resize Observer & Event Listeners ──────────────────────
+(function attachMetricPieChartInteractions() {
+  const metricCharts = [
+    { canvas: document.getElementById("netWorthPieChart"), type: "netWorth" },
+    { canvas: document.getElementById("assetsPieChart"), type: "assets" },
+    { canvas: document.getElementById("liabilitiesPieChart"), type: "liabilities" }
+  ];
+
+  // Attach mouse events for tooltips
+  metricCharts.forEach(({ canvas, type }) => {
+    if (!canvas) return;
+    
+    canvas.addEventListener("mousemove", (e) => {
+      showMetricPieChartTooltip(canvas, e.clientX, e.clientY, type);
+    });
+    
+    canvas.addEventListener("mouseleave", () => {
+      const state = metricPieChartState[type];
+      if (state.hoveredIndex !== null) {
+        state.hoveredIndex = null;
+        if (type === "netWorth") {
+          const snap = getDisplaySnapshot();
+          renderNetWorthPieChart(snap);
+        } else if (type === "assets") {
+          const snap = getDisplaySnapshot();
+          renderAssetsPieChart(snap);
+        } else if (type === "liabilities") {
+          const snap = getDisplaySnapshot();
+          renderLiabilitiesPieChart(snap);
+        }
+      }
+      hideMetricPieTooltip();
+    });
+  });
+
+  // Attach resize observer for metric cards
+  let pending = false;
+  function syncMetricCanvasSizes() {
+    let changed = false;
+    metricCharts.forEach(({ canvas }) => {
+      if (!canvas) return;
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      const w = Math.round(rect.width * dpr);
+      const h = Math.round(rect.height * dpr);
+      if (w > 0 && h > 0 && (canvas.width !== w || canvas.height !== h)) {
+        canvas.width = w;
+        canvas.height = h;
+        changed = true;
+      }
+    });
+    if (changed) {
+      const snap = getDisplaySnapshot();
+      renderNetWorthPieChart(snap);
+      renderAssetsPieChart(snap);
+      renderLiabilitiesPieChart(snap);
+    }
+    pending = false;
+  }
+
+  const ro = new ResizeObserver(() => {
+    if (!pending) {
+      pending = true;
+      requestAnimationFrame(syncMetricCanvasSizes);
+    }
+  });
+
+  metricCharts.forEach(({ canvas }) => {
+    if (canvas) {
+      const parent = canvas.closest(".metric-card");
+      if (parent) ro.observe(parent);
+    }
+  });
+
+  // Initial render after first frame
+  requestAnimationFrame(() => {
+    const snap = getDisplaySnapshot();
+    renderNetWorthPieChart(snap);
+    renderAssetsPieChart(snap);
+    renderLiabilitiesPieChart(snap);
+  });
 }());
 
 startServerHeartbeat();
@@ -1377,17 +1500,29 @@ async function bootstrap() {
   // Probe server availability first (non-blocking for the initial render)
   void probeServer();
 
+  // Always start from a neutral view; source files are loaded immediately after.
+  snapshots = [];
+  if (currentMode === "demo") {
+    formState = freshFormState("demo");
+  } else {
+    formState = freshFormState("live");
+  }
+  editingSnapshotDate = mmddyy(new Date());
+
   renderAll();
   startAutoQuoteRefresh();
   requestBackgroundQuoteRefresh();
   updateModeToggleUI();
 
   if (currentMode === "demo") {
-    resetDemoState();
-    snapshots = [];
     formState = freshFormState("demo");
     await fetchHistoricalPrices();
-    await loadDemoData();       // loads quickly with live quote as fallback price
+    // Always read demo source file fresh on reload.
+    const loadedDemo = await loadDemoData();
+    if (!loadedDemo) {
+      // Fallback only when source file cannot be read.
+      snapshots = loadSnapshots();
+    }
     // re-enrich snapshot prices now that historical data is available
     snapshots = snapshots.map((snap) => {
       const price = historicalPrices[snap.date];
@@ -1409,6 +1544,10 @@ async function bootstrap() {
     saveSnapshots();
   } else {
     // Live mode: wait for server probe, then load from file
+    if (!liveHistoryFile) {
+      liveHistoryFile = localStorage.getItem(LIVE_LAST_VIEWED_FILE_KEY) || "my_history.csv";
+      persistLiveFileSelection(liveHistoryFile);
+    }
     await probeServer();
     updateModeToggleUI();
     await fetchHistoricalPrices();
@@ -1475,6 +1614,12 @@ async function bootstrap() {
             renderAll();
             return;
           }
+        }
+      } else if (!snapshots.length) {
+        const loaded = await loadLiveSnapshotsFromStaticCsv();
+        if (loaded.length > 0) {
+          snapshots = loaded;
+          seedTodayFormStateFromHistory({ save: true });
         }
       }
     }
@@ -1851,6 +1996,9 @@ async function fetchLiveHistoryFile(filenameOverride = null) {
 async function writeLiveHistoryFile(content, encrypted = false, { strict = false, filename = null } = {}) {
   const targetFile = filename || liveHistoryFile;
   if (!serverAvailable) {
+    await probeServer();
+  }
+  if (!serverAvailable) {
     if (strict) throw new Error("Server unavailable");
     return false;
   }
@@ -1937,6 +2085,32 @@ async function loadLiveSnapshotsFromServer() {
   }
 }
 
+// Load live snapshots from bundled static CSV (no API server required).
+async function loadLiveSnapshotsFromStaticCsv(filenameOverride = null) {
+  const file = filenameOverride
+    || liveHistoryFile
+    || localStorage.getItem(LIVE_LAST_VIEWED_FILE_KEY)
+    || "my_history.csv";
+  if (!file || !file.endsWith(".csv")) return [];
+  try {
+    let res = await fetch(`history_files/${file}`, { cache: "no-cache" });
+    if (!res.ok) {
+      res = await fetch(`/history_files/${file}`, { cache: "no-cache" });
+    }
+    if (!res.ok) return [];
+    const raw = await res.text();
+    const parsed = parseLiveHistoryCsv(raw);
+    if (parsed.length > 0) {
+      liveHistoryFile = file;
+      persistLiveFileSelection(file);
+      localStorage.setItem(STORE_KEY_LIVE, JSON.stringify(parsed));
+    }
+    return parsed;
+  } catch {
+    return [];
+  }
+}
+
 // If the selected live file is missing on the server, recreate a clean decrypted base file.
 async function ensureLiveBaseFileIfMissing() {
   if (!serverAvailable || currentMode !== "live") return false;
@@ -1953,7 +2127,7 @@ async function ensureLiveBaseFileIfMissing() {
   liveEncryptionEnabled = false;
   liveEncryptionPassword = null;
   liveAccessLocked = false;
-  localStorage.setItem(LIVE_HISTORY_FILE_KEY, liveHistoryFile);
+  persistLiveFileSelection(liveHistoryFile);
   localStorage.setItem(LIVE_ENCRYPTION_ENABLED_KEY, "0");
 
   snapshots = [];
@@ -2001,6 +2175,12 @@ async function saveLiveSnapshotsToServer() {
     localStorage.setItem(STORE_KEY_LIVE, JSON.stringify(snapshots));
     await writeLiveHistoryFile(csv, false);
   }
+}
+
+async function saveDemoSnapshotsToServer() {
+  const csv = snapshotsToCsv(snapshots);
+  // demo source file is always plain CSV
+  await writeLiveHistoryFile(csv, false, { filename: "demo_history.csv" });
 }
 
 // Fetch list of available history files from server.
@@ -2140,7 +2320,7 @@ async function switchLiveFile(filename) {
     liveEncryptionPassword = pw;
     liveFilePasswords.set(filename, pw);
     liveHistoryFile = filename;
-    localStorage.setItem(LIVE_HISTORY_FILE_KEY, liveHistoryFile);
+    persistLiveFileSelection(liveHistoryFile);
     liveAccessLocked = false;
     liveEncryptionEnabled = true;
     localStorage.setItem(LIVE_ENCRYPTION_ENABLED_KEY, "1");
@@ -2149,7 +2329,7 @@ async function switchLiveFile(filename) {
     const raw = await fetchLiveHistoryFile(filename);
     snapshots = raw !== null ? parseLiveHistoryCsv(raw) : [];
     liveHistoryFile = filename;
-    localStorage.setItem(LIVE_HISTORY_FILE_KEY, liveHistoryFile);
+    persistLiveFileSelection(liveHistoryFile);
     liveAccessLocked = false;
     liveEncryptionEnabled = false;
     liveEncryptionPassword = null;
@@ -2189,7 +2369,7 @@ async function createLiveFile(filename) {
 
   const prevFile = liveHistoryFile;
   liveHistoryFile = filename;
-  localStorage.setItem(LIVE_HISTORY_FILE_KEY, liveHistoryFile);
+  persistLiveFileSelection(liveHistoryFile);
 
   const prevBtcusd = Number(formState.btcusd || 0);
   const prevManualBtcusd = formState.manualBtcusd;
@@ -2202,7 +2382,7 @@ async function createLiveFile(filename) {
     });
     if (!pw) {
       liveHistoryFile = prevFile;
-      localStorage.setItem(LIVE_HISTORY_FILE_KEY, liveHistoryFile);
+      persistLiveFileSelection(liveHistoryFile);
       return;
     }
 
@@ -2280,6 +2460,8 @@ function saveForm() {
 
 function loadSnapshots() {
   try {
+    // Keep encrypted live hidden until explicit unlock.
+    if (currentMode === "live" && liveEncryptionEnabled) return [];
     const key = currentMode === "demo" ? STORE_KEY_DEMO : STORE_KEY_LIVE;
     const raw = localStorage.getItem(key);
     if (!raw) return [];
@@ -2295,9 +2477,10 @@ function saveSnapshots() {
     void saveLiveSnapshotsToServer();
     return;
   }
-  // Demo mode: localStorage only
+  // Demo mode: persist both local cache and source CSV file.
   const sorted = snapshots.slice().sort((a, b) => parseMMDDYY(b.date) - parseMMDDYY(a.date));
   localStorage.setItem(STORE_KEY_DEMO, JSON.stringify(sorted));
+  void saveDemoSnapshotsToServer();
 }
 
 async function refreshQuote({ background = false } = {}) {
@@ -2623,6 +2806,29 @@ function saveSnapshot() {
   persistSnapshotForActiveSelection({ render: true });
 }
 
+function propagateNameRenameAcrossSnapshots(rowKey, oldNameRaw, newNameRaw, currentDate) {
+  const oldName = String(oldNameRaw || "").trim();
+  const newName = String(newNameRaw || "").trim();
+  if (!oldName || !newName || oldName === newName) return;
+
+  if (rowKey !== "assets" && rowKey !== "liabilities") return;
+
+  for (const snap of snapshots) {
+    if (snap.date === currentDate) continue;
+    for (const row of (snap[rowKey] || [])) {
+      if (String(row.name || "").trim() === oldName) {
+        row.name = newName;
+      }
+    }
+  }
+
+  const excludedSet = rowKey === "assets" ? excludedAssets : excludedLiabilities;
+  if (excludedSet.has(oldName)) {
+    excludedSet.delete(oldName);
+    excludedSet.add(newName);
+  }
+}
+
 function persistSnapshotForActiveSelection({ render = true, onlyIfDirty = false, trackAction = true, actionLabel = "snapshot-update" } = {}) {
   if (currentMode === "live" && (liveAccessLocked || !liveHistoryFile)) {
     if (render) {
@@ -2662,12 +2868,14 @@ function persistSnapshotForActiveSelection({ render = true, onlyIfDirty = false,
     const snap = normalizedSnapshot(sourcePrice);
     snap.date = targetDate;
     snap.timestamp = existing?.timestamp || new Date().toISOString();
+    
     const idx = snapshots.findIndex((s) => s.date === targetDate);
     if (idx >= 0) snapshots[idx] = snap;
     else snapshots.push(snap);
     snapshots.sort((a, b) => parseMMDDYY(a.date) - parseMMDDYY(b.date));
     hasUnsavedAssetLiabilityChanges = false;
     saveSnapshots();
+    saveFilters(currentMode);
     if (render) {
       editorRowsFocused = false;
       renderAll();
@@ -2706,23 +2914,14 @@ function comparableRowsFromSnapshot(rows) {
 function rowsSignature(rows) {
   return JSON.stringify(rows.map((r) => [r.name, r.unit, Number(r.value).toFixed(8)]));
 }
-
-function inferEditingSnapshotDate() {
-  const today = mmddyy(new Date());
-  if (!snapshots.length) return today;
-
-  const assetsSig = rowsSignature(comparableRowsFromForm(formState.assets));
-  const liabilitiesSig = rowsSignature(comparableRowsFromForm(formState.liabilities));
-  const match = snapshots.find((s) => {
-    const snapAssetsSig = rowsSignature(comparableRowsFromSnapshot(s.assets));
-    const snapLiabilitiesSig = rowsSignature(comparableRowsFromSnapshot(s.liabilities));
-    return snapAssetsSig === assetsSig && snapLiabilitiesSig === liabilitiesSig;
-  });
-  return match ? match.date : today;
-}
-
 function selectSnapshot(date) {
   const today = mmddyy(new Date());
+  
+  // Persist any unsaved changes to the current snapshot before switching
+  if (hasUnsavedAssetLiabilityChanges && editingSnapshotDate && editingSnapshotDate !== date) {
+    persistSnapshotForActiveSelection({ render: false, trackAction: true });
+  }
+  
   editingSnapshotDate = date;
   const snap = snapshots.find((s) => s.date === date);
   if (!snap) {
@@ -2925,6 +3124,9 @@ function renderEditor(container, key) {
       }, 0);
     });
     name.addEventListener("focus", () => captureEditorFieldBaseline(name));
+    name.addEventListener("focus", () => {
+      name.dataset.originalName = String(formState[key][idx]?.name || "").trim();
+    });
     name.addEventListener("input", () => {
       const wasComplete = isRowComplete(formState[key][idx]);
       const prevName = formState[key][idx].name;
@@ -2939,6 +3141,12 @@ function renderEditor(container, key) {
         persistSnapshotForActiveSelection({ render: false, onlyIfDirty: true, trackAction: false });
       }
     });
+    name.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        name.blur();
+      }
+    });
     name.addEventListener("blur", (e) => {
       // Ignore synthetic blur triggered when rerender removes this input from the DOM.
       if (!e.target.isConnected) {
@@ -2948,6 +3156,12 @@ function renderEditor(container, key) {
       const before = consumeEditorFieldBaseline(name);
       runTrackedActionFromBefore(`${key}-name-edit`, before, () => {
         hasUnsavedAssetLiabilityChanges = true;
+        const oldName = String(name.dataset.originalName || "").trim();
+        const newName = String(name.value || "").trim();
+        if ((key === "assets" || key === "liabilities") && oldName && newName && oldName !== newName) {
+          const targetDate = editingSnapshotDate || mmddyy(new Date());
+          propagateNameRenameAcrossSnapshots(key, oldName, newName, targetDate);
+        }
         const next = e.relatedTarget;
         const stayingInSameRow = Boolean(next && wrap.contains(next));
         persistSnapshotForActiveSelection({ render: !stayingInSameRow, onlyIfDirty: false, trackAction: false });
@@ -2997,7 +3211,20 @@ function renderEditor(container, key) {
       }
     });
     amount.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") amount.blur();
+      if (e.key === "Enter") {
+        e.preventDefault();
+        suppressNextEditorFocusRestore = true;
+        pendingRowFieldFocus = null;
+        amount.blur();
+        setTimeout(() => {
+          // Ensure Enter commits and the amount field does not retain focus.
+          if (document.activeElement === amount) {
+            amount.blur();
+          }
+          focusBodyWithoutScroll();
+          editorRowsFocused = false;
+        }, 0);
+      }
       if (e.key === "Tab" && !e.shiftKey && (key === "assets" || key === "liabilities")) {
         // Keep focus flow predictable inside a row: Name -> Unit -> Amount
         e.preventDefault();
@@ -3070,7 +3297,7 @@ function renderEditor(container, key) {
         setTimeout(flushDeferredQuoteUiRefresh, 0);
       });
       unit.addEventListener("change", () => {
-        pendingRowFieldFocus = { key, idx, field: "unit" };
+        pendingRowFieldFocus = { key, idx, field: "amount" };
         const before = trackedStateSnapshot();
         runTrackedActionFromBefore(`${key}-unit-edit`, before, () => {
           const prevUnit = normalizeUnit(formState[key][idx].unit);
@@ -3102,6 +3329,8 @@ function renderEditor(container, key) {
           amount.value = formatAmountInputValue(nextAmount, nextUnit);
           hasUnsavedAssetLiabilityChanges = true;
           saveForm();
+          // Drop focus from the select so render can run and restore focus to amount.
+          unit.blur();
           persistSnapshotForActiveSelection({ render: true, onlyIfDirty: true, trackAction: false });
         });
       });
@@ -3154,6 +3383,12 @@ function renderEditor(container, key) {
         if (focusTarget.field === "unit") {
           const unitEl = wrap.querySelector("select");
           if (unitEl) unitEl.focus();
+        } else if (focusTarget.field === "amount") {
+          const amountEl = wrap.querySelector(`input[data-row-key="${key}"][data-field="amount"]`);
+          if (amountEl) {
+            amountEl.focus();
+            amountEl.select();
+          }
         }
       }, 0);
     }
@@ -3287,6 +3522,313 @@ function updateKPIs() {
   el.liabilitiesMetricUsd.textContent = formatUsd(snap.totals.liabilities_usd);
   el.netMetric.textContent = formatBtc(snap.totals.net_btc);
   el.netMetricUsd.textContent = formatUsd(snap.totals.net_usd);
+  
+  // Update pie charts
+  renderNetWorthPieChart(snap);
+  renderAssetsPieChart(snap);
+  renderLiabilitiesPieChart(snap);
+}
+
+function renderNetWorthPieChart(snap) {
+  const canvas = document.getElementById("netWorthPieChart");
+  if (!canvas) return;
+  
+  const assets = Number(snap.totals.assets_btc || 0);
+  const liabilities = Number(snap.totals.liabilities_btc || 0);
+  const total = assets + liabilities;
+  
+  const slices = [];
+  if (total > 0) {
+    slices.push({ name: "Assets", value: assets, color: "#39d7a4" });
+    slices.push({ name: "Liabilities", value: liabilities, color: "#ef6f6c" });
+  }
+  
+  metricPieChartState.netWorth.slices = slices;
+  drawMetricPieChart(canvas, slices, metricPieChartState.netWorth.hoveredIndex, "netWorth");
+}
+
+function darkenHexColor(hex, amount) {
+  const cleaned = String(hex || "").replace("#", "");
+  if (!/^[0-9a-fA-F]{6}$/.test(cleaned)) return hex;
+  const clamp = (v) => Math.max(0, Math.min(255, Math.round(v)));
+  const r = parseInt(cleaned.slice(0, 2), 16);
+  const g = parseInt(cleaned.slice(2, 4), 16);
+  const b = parseInt(cleaned.slice(4, 6), 16);
+  const factor = Math.max(0, Math.min(1, 1 - Number(amount || 0)));
+  const rr = clamp(r * factor).toString(16).padStart(2, "0");
+  const gg = clamp(g * factor).toString(16).padStart(2, "0");
+  const bb = clamp(b * factor).toString(16).padStart(2, "0");
+  return `#${rr}${gg}${bb}`;
+}
+
+function renderAssetsPieChart(snap) {
+  const canvas = document.getElementById("assetsPieChart");
+  if (!canvas) return;
+  
+  const assets = snap.assets || [];
+  const btcusd = snap.btcusd || formState.btcusd || 1;
+  
+  const slices = assets
+    .map((a) => {
+      let btcValue = 0;
+      if (a.unit === "BTC") {
+        btcValue = Number(a.value || 0);
+      } else {
+        btcValue = Number(a.value || 0) / btcusd;
+      }
+      return { name: a.name, value: btcValue };
+    })
+    .filter((s) => s.value > 0)
+    .sort((a, b) => b.value - a.value);
+  
+  // Start at KPI green, then darken each subsequent slice.
+  const baseGreen = "#39d7a4";
+  slices.forEach((s, i) => {
+    const darkenAmount = Math.min(i * 0.09, 0.72);
+    s.color = darkenHexColor(baseGreen, darkenAmount);
+  });
+  
+  metricPieChartState.assets.slices = slices;
+  drawMetricPieChart(canvas, slices, metricPieChartState.assets.hoveredIndex, "assets");
+}
+
+function renderLiabilitiesPieChart(snap) {
+  const canvas = document.getElementById("liabilitiesPieChart");
+  if (!canvas) return;
+  
+  const liabilities = snap.liabilities || [];
+  const btcusd = snap.btcusd || formState.btcusd || 1;
+  
+  const slices = liabilities
+    .map((l) => {
+      let btcValue = 0;
+      if (l.unit === "BTC") {
+        btcValue = Number(l.value || 0);
+      } else {
+        btcValue = Number(l.value || 0) / btcusd;
+      }
+      return { name: l.name, value: btcValue };
+    })
+    .filter((s) => s.value > 0)
+    .sort((a, b) => b.value - a.value);
+  
+  // Start at KPI red, then darken each subsequent slice.
+  const baseRed = "#ef6f6c";
+  slices.forEach((s, i) => {
+    const darkenAmount = Math.min(i * 0.09, 0.72);
+    s.color = darkenHexColor(baseRed, darkenAmount);
+  });
+  
+  metricPieChartState.liabilities.slices = slices;
+  drawMetricPieChart(canvas, slices, metricPieChartState.liabilities.hoveredIndex, "liabilities");
+}
+
+function drawMetricPieChart(canvas, slices, hoveredIndex, chartType) {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  
+  // Set canvas resolution for crisp rendering
+  canvas.width = Math.round(rect.width * dpr);
+  canvas.height = Math.round(rect.height * dpr);
+  
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  
+  ctx.scale(dpr, dpr);
+  
+  const w = rect.width;
+  const h = rect.height;
+  const centerX = w / 2;
+  const centerY = h / 2;
+  
+  // Calculate radius to fit nicely with equal spacing
+  const maxRadius = Math.min(w, h) / 2;
+  const spacing = 6; // pixels for spacing
+  const radius = Math.max(maxRadius - spacing, 20);
+  
+  if (!slices.length || slices.every(s => s.value === 0)) {
+    // No data
+    ctx.fillStyle = themeValue("--muted");
+    ctx.font = "12px Space Grotesk";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("—", centerX, centerY);
+    return;
+  }
+  
+  const total = slices.reduce((sum, s) => sum + s.value, 0);
+  if (total <= 0) return;
+
+  let hoveredStartAngle = null;
+  let hoveredEndAngle = null;
+  
+  // Draw pie slices starting from top (12 o'clock = -Math.PI / 2)
+  let currentAngle = -Math.PI / 2;
+  
+  slices.forEach((slice, index) => {
+    const sliceAngle = (slice.value / total) * 2 * Math.PI;
+    const startAngle = currentAngle;
+    const endAngle = currentAngle + sliceAngle;
+    
+    // Draw slice
+    ctx.beginPath();
+    ctx.moveTo(centerX, centerY);
+    ctx.arc(centerX, centerY, radius, startAngle, endAngle);
+    ctx.closePath();
+    
+    // Fill slice
+    ctx.fillStyle = slice.color;
+    ctx.fill();
+
+    if (index === hoveredIndex) {
+      hoveredStartAngle = startAngle;
+      hoveredEndAngle = endAngle;
+    }
+    
+    // Draw separator line at the end of each slice
+    ctx.strokeStyle = themeValue("--pie-slice-divider") || "rgba(255, 255, 255, 0.38)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(centerX, centerY);
+    ctx.lineTo(
+      centerX + Math.cos(endAngle) * radius,
+      centerY + Math.sin(endAngle) * radius
+    );
+    ctx.stroke();
+    
+    currentAngle = endAngle;
+  });
+
+  // Draw hovered slice outline last so it always overlays delimiter lines.
+  if (hoveredStartAngle !== null && hoveredEndAngle !== null) {
+    ctx.beginPath();
+    ctx.moveTo(centerX, centerY);
+    ctx.arc(centerX, centerY, radius, hoveredStartAngle, hoveredEndAngle);
+    ctx.closePath();
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+  
+  // Store slice info for hit testing
+  metricPieChartState[chartType].slices = slices;
+}
+
+function getMetricPieChartSliceAtPoint(canvas, x, y, chartType) {
+  const rect = canvas.getBoundingClientRect();
+  const localX = x - rect.left;
+  const localY = y - rect.top;
+  
+  const centerX = rect.width / 2;
+  const centerY = rect.height / 2;
+  
+  const maxRadius = Math.min(rect.width, rect.height) / 2;
+  const spacing = 8;
+  const radius = Math.max(maxRadius - spacing, 20);
+  
+  const dx = localX - centerX;
+  const dy = localY - centerY;
+  const distance = Math.sqrt(dx * dx + dy * dy);
+  
+  if (distance > radius || distance < 2) return -1; // Outside pie or too close to center
+  
+  const angle = Math.atan2(dy, dx) + Math.PI / 2; // Adjust to start from top
+  const normalizedAngle = angle < 0 ? angle + 2 * Math.PI : angle;
+  
+  const slices = metricPieChartState[chartType].slices;
+  const total = slices.reduce((sum, s) => sum + s.value, 0);
+  if (total <= 0) return -1;
+  
+  let currentAngle = 0;
+  for (let i = 0; i < slices.length; i++) {
+    const sliceAngle = (slices[i].value / total) * 2 * Math.PI;
+    if (normalizedAngle >= currentAngle && normalizedAngle < currentAngle + sliceAngle) {
+      return i;
+    }
+    currentAngle += sliceAngle;
+  }
+  
+  return -1;
+}
+
+function showMetricPieChartTooltip(canvas, x, y, chartType) {
+  const sliceIndex = getMetricPieChartSliceAtPoint(canvas, x, y, chartType);
+  const state = metricPieChartState[chartType];
+  
+  if (sliceIndex !== state.hoveredIndex) {
+    state.hoveredIndex = sliceIndex;
+    
+    if (chartType === "netWorth") {
+      const snap = getDisplaySnapshot();
+      renderNetWorthPieChart(snap);
+    } else if (chartType === "assets") {
+      const snap = getDisplaySnapshot();
+      renderAssetsPieChart(snap);
+    } else if (chartType === "liabilities") {
+      const snap = getDisplaySnapshot();
+      renderLiabilitiesPieChart(snap);
+    }
+  }
+  
+  // Show tooltip if hovering over a slice
+  if (sliceIndex >= 0) {
+    const slices = state.slices;
+    const slice = slices[sliceIndex];
+    const tooltipText = `${slice.name}: ${Number(slice.value).toFixed(8)} BTC`;
+    
+    showMetricPieTooltip(canvas, x, y, tooltipText);
+  } else {
+    hideMetricPieTooltip();
+  }
+}
+
+let metricPieTooltipEl = null;
+
+function showMetricPieTooltip(canvas, mouseX, mouseY, text) {
+  if (!metricPieTooltipEl) {
+    metricPieTooltipEl = document.createElement("div");
+    metricPieTooltipEl.className = "metric-pie-tooltip";
+    document.body.appendChild(metricPieTooltipEl);
+  }
+  
+  metricPieTooltipEl.textContent = text;
+  metricPieTooltipEl.style.display = "block";
+  
+  // Position tooltip with offset from cursor
+  const offsetX = 10;
+  const offsetY = 10;
+  metricPieTooltipEl.style.left = (mouseX + offsetX) + "px";
+  metricPieTooltipEl.style.top = (mouseY + offsetY) + "px";
+  
+  // Ensure tooltip doesn't go off-screen
+  requestAnimationFrame(() => {
+    const rect = metricPieTooltipEl.getBoundingClientRect();
+    if (rect.right > window.innerWidth) {
+      metricPieTooltipEl.style.left = (mouseX - rect.width - offsetX) + "px";
+    }
+    if (rect.bottom > window.innerHeight) {
+      metricPieTooltipEl.style.top = (mouseY - rect.height - offsetY) + "px";
+    }
+  });
+}
+
+function hideMetricPieTooltip() {
+  if (metricPieTooltipEl) {
+    metricPieTooltipEl.style.display = "none";
+  }
+}
+
+function getDisplaySnapshot() {
+  const today = mmddyy(new Date());
+  const isHistorical = editingSnapshotDate && editingSnapshotDate !== today;
+  const existingSnap = isHistorical ? snapshots.find((s) => s.date === editingSnapshotDate) : null;
+  const historicalPrice = existingSnap && Number(existingSnap.btcusd) > 0
+    ? Number(existingSnap.btcusd)
+    : (isHistorical && Number(historicalPrices[editingSnapshotDate]) > 0
+        ? Number(historicalPrices[editingSnapshotDate])
+        : null);
+  const displayPrice = historicalPrice !== null ? historicalPrice : activeBtcusd();
+  return applyExclusionFilters(normalizedSnapshot(displayPrice), excludedAssets, excludedLiabilities, displayPrice);
 }
 
 function renderAll() {
@@ -3337,10 +3879,17 @@ function renderAll() {
   el.netMetric.textContent = formatBtc(snap.totals.net_btc);
   el.netMetricUsd.textContent = formatUsd(snap.totals.net_usd);
 
+  renderNetWorthPieChart(snap);
+  renderAssetsPieChart(snap);
+  renderLiabilitiesPieChart(snap);
+
   renderHistoryTable();
   populateFilterDropdowns();
   renderChartsOnly();
-  if (editorFocus) restoreEditorFocusState(editorFocus);
+  if (editorFocus && !suppressNextEditorFocusRestore) {
+    restoreEditorFocusState(editorFocus);
+  }
+  suppressNextEditorFocusRestore = false;
 }
 
 function computeTotals(assets, liabilities, btcusd) {
@@ -3365,13 +3914,14 @@ function applyExclusionFilters(snap, exclAssets, exclLiabs, priceOverride) {
   const filteredA = exclAssets?.size ? (snap.assets || []).filter(a => !exclAssets.has(a.name)) : (snap.assets || []);
   const filteredL = exclLiabs?.size ? (snap.liabilities || []).filter(l => !exclLiabs.has(l.name)) : (snap.liabilities || []);
   const price = priceOverride !== undefined ? priceOverride : Number(snap.btcusd || 0);
-  return { ...snap, totals: computeTotals(filteredA, filteredL, price) };
+  return { ...snap, assets: filteredA, liabilities: filteredL, totals: computeTotals(filteredA, filteredL, price) };
 }
 
 function snapshotsForCharts(displayPrice, exclAssets, exclLiabs) {
   const today = mmddyy(new Date());
   const todayMs = parseMMDDYY(today).getTime();
   const sorted = snapshots.slice().sort((a, b) => parseMMDDYY(a.date) - parseMMDDYY(b.date));
+  const snapshotByDate = new Map(sorted.map((s) => [s.date, s]));
   const hasEnteredFormRows = comparableRowsFromForm(formState.assets).length > 0 || comparableRowsFromForm(formState.liabilities).length > 0;
 
   // No historical prices loaded yet — fall back to sparse snapshot list
@@ -3411,13 +3961,22 @@ function snapshotsForCharts(displayPrice, exclAssets, exclLiabs) {
     while (si + 1 < sorted.length && snapMs[si + 1] <= curMs) si++;
     const snap = sorted[si];
     const dateKey = mmddyy(cur);
+    const exactSnapshot = snapshotByDate.get(dateKey);
 
     let price;
     if (dateKey === today) {
       price = Number.isFinite(displayPrice) && displayPrice > 0 ? displayPrice : Number(snap.btcusd || 0);
     } else {
-      price = historicalPrices[dateKey] || 0;
-      if (price <= 0) { cur.setDate(cur.getDate() + 1); continue; }
+      // Snapshot dates must use their recorded exchange rate.
+      if (exactSnapshot && Number(exactSnapshot.btcusd) > 0) {
+        price = Number(exactSnapshot.btcusd);
+      } else {
+        price = Number(historicalPrices[dateKey] || 0);
+        // Keep chart continuity when historical feed doesn't cover this date.
+        if (price <= 0 && Number(snap.btcusd) > 0) {
+          price = Number(snap.btcusd);
+        }
+      }
     }
     if (price <= 0) { cur.setDate(cur.getDate() + 1); continue; }
 
@@ -3931,7 +4490,9 @@ function parseCsvRow(line) {
 }
 
 function parseCsv(text) {
-  const lines = text.trim().split('\n').filter((l) => l.trim());
+  const normalized = String(text || "").replace(/\r\n?/g, "\n");
+  const lines = normalized.trim().split("\n").filter((l) => l.trim());
+  if (!lines.length) return [];
   const headers = parseCsvRow(lines[0]);
   return lines.slice(1).map((line) => {
     const values = parseCsvRow(line);
@@ -4111,7 +4672,7 @@ async function enableLiveEncryption() {
   // of truth instead of showing a false conversion failure.
   try {
     localStorage.setItem(LIVE_ENCRYPTION_ENABLED_KEY, "1");
-    localStorage.setItem(LIVE_HISTORY_FILE_KEY, liveHistoryFile);
+    persistLiveFileSelection(liveHistoryFile);
     localStorage.setItem(STORE_KEY_LIVE_ENC, enc);
     localStorage.removeItem(STORE_KEY_LIVE);
     localStorage.removeItem(FORM_KEY_LIVE);
@@ -4210,7 +4771,7 @@ async function disableLiveEncryption() {
   const csvFilename = liveHistoryFile.replace(/\.(csv|enc)$/, "") + ".csv";
   const csv = snapshotsToCsv(snapshots);
   liveHistoryFile = csvFilename;
-  localStorage.setItem(LIVE_HISTORY_FILE_KEY, liveHistoryFile);
+  persistLiveFileSelection(liveHistoryFile);
   await writeLiveHistoryFile(csv, false);
   localStorage.setItem(STORE_KEY_LIVE, JSON.stringify(snapshots));
   localStorage.setItem(FORM_KEY_LIVE, JSON.stringify(formState));
@@ -4239,6 +4800,10 @@ async function switchMode(newMode) {
   loadFilters(currentMode);
 
   if (currentMode === "live") {
+    if (!liveHistoryFile) {
+      liveHistoryFile = localStorage.getItem(LIVE_LAST_VIEWED_FILE_KEY) || "my_history.csv";
+      persistLiveFileSelection(liveHistoryFile);
+    }
     await probeServer();
     updateModeToggleUI();
     formState = loadForm();
@@ -4274,8 +4839,6 @@ async function switchMode(newMode) {
           // Session password no longer valid — fall back to demo
           currentMode = "demo";
           localStorage.setItem(MODE_KEY, currentMode);
-          resetDemoState();
-          snapshots = [];
           formState = freshFormState("demo");
         }
       } else if (hasEncData) {
@@ -4292,8 +4855,6 @@ async function switchMode(newMode) {
           // Cancelled — revert to demo mode
           currentMode = "demo";
           localStorage.setItem(MODE_KEY, currentMode);
-          resetDemoState();
-          snapshots = [];
           formState = freshFormState("demo");
         }
       } else {
@@ -4301,12 +4862,14 @@ async function switchMode(newMode) {
       }
     } else {
       snapshots = loadSnapshots();
+      if (!snapshots.length) {
+        snapshots = await loadLiveSnapshotsFromStaticCsv();
+      }
     }
   } else {
     // Switching to demo — clear session password so re-auth is required on return.
     liveEncryptionPassword = null;
-    resetDemoState();
-    snapshots = [];
+    snapshots = loadSnapshots();
     formState = freshFormState("demo");
   }
 
@@ -4315,7 +4878,6 @@ async function switchMode(newMode) {
   formState.manualBtcusd = null;
   renderAll();
   if (currentMode === "demo") {
-    await loadDemoData();
     // Final guard: ensure charts are not constrained by any previous live range.
     chartRange = { startDate: null, endDate: null };
     el.chartStartDate.value = "";
@@ -4327,26 +4889,42 @@ async function switchMode(newMode) {
 
 async function loadDemoData() {
   try {
-    const response = await fetch('history_files/demo_history.csv', { cache: 'no-cache' });
-    if (!response.ok) return;
+    let response = await fetch("history_files/demo_history.csv", { cache: "no-cache" });
+    if (!response.ok) {
+      response = await fetch("/history_files/demo_history.csv", { cache: "no-cache" });
+    }
+    if (!response.ok) return false;
     const text = await response.text();
     const rows = parseCsv(text);
-    snapshots = rows.map((row) => {
-      const yyyymmddDate = String(row.date).trim();
-      const mmddyyDate = yyyymmddToMMDDYY(yyyymmddDate);
-      const btcusd = Number(historicalPrices[mmddyyDate] || formState.btcusd || 0);
-      const assets = JSON.parse(row.assets);
-      const liabilities = JSON.parse(row.liabilities);
+    if (!rows.length) return false;
+    const parsedSnapshots = rows.map((row) => {
+      try {
+        const yyyymmddDate = String(row.date || "").trim();
+        if (!/^\d{8}$/.test(yyyymmddDate)) return null;
+        const mmddyyDate = yyyymmddToMMDDYY(yyyymmddDate);
+        const btcusd = Number(historicalPrices[mmddyyDate] || formState.btcusd || 0);
 
-      return {
-        date: mmddyyDate,
-        timestamp: parseMMDDYY(mmddyyDate).toISOString(),
-        btcusd,
-        assets,
-        liabilities,
-        totals: computeTotals(assets, liabilities, btcusd)
-      };
-    });
+        const assetsRaw = row.assets;
+        const liabilitiesRaw = row.liabilities;
+        const assets = typeof assetsRaw === "string" ? JSON.parse(assetsRaw) : (assetsRaw || []);
+        const liabilities = typeof liabilitiesRaw === "string" ? JSON.parse(liabilitiesRaw) : (liabilitiesRaw || []);
+        if (!Array.isArray(assets) || !Array.isArray(liabilities)) return null;
+
+        return {
+          date: mmddyyDate,
+          timestamp: parseMMDDYY(mmddyyDate).toISOString(),
+          btcusd,
+          assets,
+          liabilities,
+          totals: computeTotals(assets, liabilities, btcusd)
+        };
+      } catch {
+        return null;
+      }
+    }).filter(Boolean);
+
+    if (!parsedSnapshots.length) return false;
+    snapshots = parsedSnapshots;
     editingSnapshotDate = mmddyy(new Date());
     hasUnsavedAssetLiabilityChanges = false;
     seedTodayFormStateFromHistory({ save: true });
@@ -4354,8 +4932,10 @@ async function loadDemoData() {
     // Reset chart range so loading fresh demo data always shows the full history span.
     chartRange = { startDate: null, endDate: null };
     renderAll();
+    return true;
   } catch (e) {
-    console.warn('Could not load demo data:', e);
+    console.warn("Could not load demo data:", e);
+    return false;
   }
 }
 

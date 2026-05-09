@@ -48,8 +48,6 @@ class Handler(SimpleHTTPRequestHandler):
         name = Path(filename).name  # strip any directory components
         if not name.endswith((".csv", ".enc")):
             return None
-        if name == "demo_history.csv":
-            return None
         return self._history_dir / name
 
     def _send_text(self, status: int, text: str, content_type: str = "text/plain; charset=utf-8") -> None:
