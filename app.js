@@ -4271,7 +4271,7 @@ function drawLineChart(canvas, datasets, labels, opts = {}) {
   if (!allValues.length) {
     ctx.fillStyle = chartTick;
     ctx.font = `${fs(30)}px Space Grotesk`;
-    ctx.fillText("No saved data yet. Add an asset or liability.", 28, 46);
+    ctx.fillText(opts.emptyMessage || "No saved data yet. Add an asset or liability.", 28, 46);
     return;
   }
 
@@ -4492,6 +4492,8 @@ function renderAssetLiabilityChart(chartSnapshots = snapshots) {
   }
 
   if (alChartMode === "ratio") {
+    const allAssetNames = getAllAssetNames();
+    const allAssetsExcluded = allAssetNames.length > 0 && excludedAssets.size >= allAssetNames.length;
     const plottedSnapshots = chartSnapshots.filter((s) => {
       const assetsBtc = Number(s.totals?.assets_btc || 0);
       return assetsBtc > 0;
@@ -4499,7 +4501,11 @@ function renderAssetLiabilityChart(chartSnapshots = snapshots) {
 
     if (!plottedSnapshots.length) {
       chartInteractionState.alChart = { labels: [], markerDates: [] };
-      drawLineChart(el.alChart, [], []);
+      drawLineChart(el.alChart, [], [], {
+        emptyMessage: allAssetsExcluded
+          ? "No LTA Ratio to show because all assets are excluded by filters."
+          : "No saved data yet. Add an asset or liability."
+      });
       return;
     }
 
