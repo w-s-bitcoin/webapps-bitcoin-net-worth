@@ -1211,6 +1211,39 @@ select {
   margin-bottom: 0;
 }
 
+.chart-mode-toggle {
+  display: inline-flex;
+  gap: 0;
+  width: fit-content;
+  align-items: center;
+  padding: 3px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+.chart-mode-btn {
+  background: transparent;
+  border: none;
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 500;
+  padding: 4px 16px;
+  border-radius: 999px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.chart-mode-btn:hover {
+  color: var(--text);
+}
+
+.chart-mode-btn.active {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
 .chart-range-controls {
   display: flex;
   gap: 16px;

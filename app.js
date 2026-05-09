@@ -15,6 +15,7 @@ const THEME_KEY = "bitcoinNetWorthTrackerThemeV1";
 const BTCUSD_CACHE_KEY = "bitcoinNetWorthTrackerBtcusdCacheV1";
 const FILTER_KEY_DEMO = "bitcoinNetWorthTrackerFiltersDemoV1";
 const FILTER_KEY_LIVE = "bitcoinNetWorthTrackerFiltersLiveV1";
+const AL_CHART_MODE_KEY = "bitcoinNetWorthTrackerAlChartModeV1";
 const QUOTE_AUTO_REFRESH_MS = 60_000;
 const QUOTE_AUTO_REFRESH_OFFSET_MS = 1_000;
 const SERVER_HEARTBEAT_API = "/api/heartbeat";
@@ -172,6 +173,7 @@ let pendingBackgroundQuoteRefresh = false;
 let editorRowsFocused = false;
 let lastQuoteRefreshAt = null;
 let suppressNextEditorFocusRestore = false;
+let alChartMode = localStorage.getItem(AL_CHART_MODE_KEY) === "ratio" ? "ratio" : "value";
 
 if (currentMode === "demo") {
   formState = freshFormState("demo");
@@ -215,6 +217,10 @@ const el = {
   historyCount: document.getElementById("historyCount"),
   historyTableBody: document.getElementById("historyTableBody"),
   alChart: document.getElementById("alChart"),
+  alChartTitle: document.getElementById("alChartTitle"),
+  alChartModeToggle: document.getElementById("alChartModeToggle"),
+  alModeValueBtn: document.getElementById("alModeValueBtn"),
+  alModeRatioBtn: document.getElementById("alModeRatioBtn"),
   netChart: document.getElementById("netChart"),
   themeToggle: document.getElementById("themeToggle"),
   themeDarkBtn: document.getElementById("themeDarkBtn"),
@@ -367,6 +373,29 @@ el.liveFileCreateBtn.addEventListener("click", async () => {
 document.querySelectorAll(".add-row-btn").forEach((btn) => {
   if (btn.dataset.target) btn.addEventListener("click", () => addRow(btn.dataset.target));
 });
+
+if (el.alModeValueBtn && el.alModeRatioBtn) {
+  const syncAlChartModeUI = () => {
+    const isValue = alChartMode === "value";
+    el.alModeValueBtn.classList.toggle("active", isValue);
+    el.alModeRatioBtn.classList.toggle("active", !isValue);
+    el.alModeValueBtn.setAttribute("aria-pressed", isValue ? "true" : "false");
+    el.alModeRatioBtn.setAttribute("aria-pressed", isValue ? "false" : "true");
+  };
+
+  const setAlChartMode = (mode) => {
+    if (mode !== "value" && mode !== "ratio") return;
+    if (alChartMode === mode) return;
+    alChartMode = mode;
+    localStorage.setItem(AL_CHART_MODE_KEY, alChartMode);
+    syncAlChartModeUI();
+    renderChartsOnly();
+  };
+
+  el.alModeValueBtn.addEventListener("click", () => setAlChartMode("value"));
+  el.alModeRatioBtn.addEventListener("click", () => setAlChartMode("ratio"));
+  syncAlChartModeUI();
+}
 
 // ── Global overlay registry (one open at a time) ────────────────────────────
 const _overlayClosers = new Set();
@@ -4290,7 +4319,9 @@ function drawLineChart(canvas, datasets, labels, opts = {}) {
       } else {
         const pctStr = formatChartTooltipValue(val, Boolean(opts.percent));
         const pctColor = val >= 0 ? "#39d7a4" : "#ff5555";
-        const valColor = opts.percent ? pctColor : dsColor;
+        const valColor = opts.percent
+          ? (opts.percentValueColor || pctColor)
+          : dsColor;
         const valStr = ds.valueFormatter ? ds.valueFormatter(val) : pctStr;
         lines.push([{ text: valStr, color: valColor }]);
       }
@@ -4354,6 +4385,56 @@ function formatSatsCompact(sats) {
 }
 
 function renderAssetLiabilityChart(chartSnapshots = snapshots) {
+  if (el.alChartTitle) {
+    el.alChartTitle.textContent = alChartMode === "ratio"
+      ? "Liabilities-to-Assets Ratio"
+      : "Assets & Liabilities Valued in BTC";
+  }
+
+  if (alChartMode === "ratio") {
+    const plottedSnapshots = chartSnapshots.filter((s) => {
+      const assetsBtc = Number(s.totals?.assets_btc || 0);
+      return assetsBtc > 0;
+    });
+
+    if (!plottedSnapshots.length) {
+      chartInteractionState.alChart = { labels: [], markerDates: [] };
+      drawLineChart(el.alChart, [], []);
+      return;
+    }
+
+    const labels = plottedSnapshots.map((s) => s.date);
+    const markerDates = historyDatesIncludingToday().filter((d) => labels.includes(d));
+    chartInteractionState.alChart = { labels, markerDates };
+
+    const ratiosPct = plottedSnapshots.map((s) => {
+      const assets = Number(s.totals?.assets_btc || 0);
+      const liabilities = Number(s.totals?.liabilities_btc || 0);
+      if (assets <= 0) return 0;
+      return (liabilities / assets) * 100;
+    });
+
+    const datasets = [
+      {
+        label: "Liabilities / Assets",
+        color: "#2bb5ff",
+        values: ratiosPct,
+        valueFormatter: (v) => `${Number(v).toFixed(2)}%`
+      }
+    ];
+
+    drawLineChart(el.alChart, datasets, labels, {
+      minZero: true,
+      percent: true,
+      percentValueColor: "#2bb5ff",
+      historyMarkerDates: markerDates,
+      selectedHistoryDate: editingSnapshotDate,
+      hoveredHistoryDate: hoveredSnapshotDate,
+      hoverY: hoveredCanvasY
+    });
+    return;
+  }
+
   const shouldSuppressZeroPoints = excludedAssets.size > 0 || excludedLiabilities.size > 0;
   const plottedSnapshots = shouldSuppressZeroPoints
     ? chartSnapshots.filter((s) => {
