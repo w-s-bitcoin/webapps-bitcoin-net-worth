@@ -16,6 +16,7 @@ const BTCUSD_CACHE_KEY = "bitcoinNetWorthTrackerBtcusdCacheV1";
 const FILTER_KEY_DEMO = "bitcoinNetWorthTrackerFiltersDemoV1";
 const FILTER_KEY_LIVE = "bitcoinNetWorthTrackerFiltersLiveV1";
 const AL_CHART_MODE_KEY = "bitcoinNetWorthTrackerAlChartModeV1";
+const AL_CHART_AXES_MODE_KEY = "bitcoinNetWorthTrackerAlChartAxesModeV1";
 const NET_CHART_AXES_MODE_KEY = "bitcoinNetWorthTrackerNetChartAxesModeV1";
 const QUOTE_AUTO_REFRESH_MS = 60_000;
 const QUOTE_AUTO_REFRESH_OFFSET_MS = 1_000;
@@ -177,6 +178,7 @@ let editorRowsFocused = false;
 let lastQuoteRefreshAt = null;
 let suppressNextEditorFocusRestore = false;
 let alChartMode = localStorage.getItem(AL_CHART_MODE_KEY) === "ratio" ? "ratio" : "value";
+let alChartSeparateAxes = localStorage.getItem(AL_CHART_AXES_MODE_KEY) === "separate";
 let netChartSeparateAxes = localStorage.getItem(NET_CHART_AXES_MODE_KEY) === "separate";
 
 if (currentMode === "demo") {
@@ -226,6 +228,8 @@ const el = {
   alChartModeToggle: document.getElementById("alChartModeToggle"),
   alModeValueBtn: document.getElementById("alModeValueBtn"),
   alModeRatioBtn: document.getElementById("alModeRatioBtn"),
+  alChartSeparateAxes: document.getElementById("alChartSeparateAxes"),
+  alChartAxisToggleWrap: document.getElementById("alChartAxisToggleWrap"),
   netChartSeparateAxes: document.getElementById("netChartSeparateAxes"),
   netChartLegend: document.getElementById("netChartLegend"),
   netChart: document.getElementById("netChart"),
@@ -324,9 +328,7 @@ document.getElementById("refreshQuoteBtn").addEventListener("click", () => {
   void runTrackedAction("quote-refresh", () => refreshQuote());
 });
 el.themeToggle.addEventListener("click", () => {
-  runTrackedAction("theme-toggle", () => {
-    setTheme(currentTheme === "dark" ? "light" : "dark");
-  });
+  setTheme(currentTheme === "dark" ? "light" : "dark");
 });
 if (el.undoBtn) {
   el.undoBtn.addEventListener("click", () => undoLastAction());
@@ -386,13 +388,22 @@ document.querySelectorAll(".add-row-btn").forEach((btn) => {
   if (btn.dataset.target) btn.addEventListener("click", () => addRow(btn.dataset.target));
 });
 
-if (el.alModeValueBtn && el.alModeRatioBtn) {
+if (el.alChartModeToggle && el.alModeValueBtn && el.alModeRatioBtn) {
   const syncAlChartModeUI = () => {
     const isValue = alChartMode === "value";
     el.alModeValueBtn.classList.toggle("active", isValue);
     el.alModeRatioBtn.classList.toggle("active", !isValue);
     el.alModeValueBtn.setAttribute("aria-pressed", isValue ? "true" : "false");
     el.alModeRatioBtn.setAttribute("aria-pressed", isValue ? "false" : "true");
+    const axisDisabled = !isValue;
+    if (el.alChartSeparateAxes) {
+      el.alChartSeparateAxes.disabled = axisDisabled;
+      el.alChartSeparateAxes.setAttribute("aria-disabled", axisDisabled ? "true" : "false");
+    }
+    if (el.alChartAxisToggleWrap) {
+      el.alChartAxisToggleWrap.classList.toggle("is-disabled", axisDisabled);
+      el.alChartAxisToggleWrap.setAttribute("aria-disabled", axisDisabled ? "true" : "false");
+    }
   };
 
   const setAlChartMode = (mode) => {
@@ -404,9 +415,39 @@ if (el.alModeValueBtn && el.alModeRatioBtn) {
     renderChartsOnly();
   };
 
-  el.alModeValueBtn.addEventListener("click", () => setAlChartMode("value"));
-  el.alModeRatioBtn.addEventListener("click", () => setAlChartMode("ratio"));
+  const toggleAlChartMode = () => {
+    setAlChartMode(alChartMode === "value" ? "ratio" : "value");
+  };
+
+  el.alModeValueBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (alChartMode === "value") {
+      runTrackedAction("al-chart-mode-toggle", () => toggleAlChartMode());
+      return;
+    }
+    runTrackedAction("al-chart-mode-value", () => setAlChartMode("value"));
+  });
+  el.alModeRatioBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (alChartMode === "ratio") {
+      runTrackedAction("al-chart-mode-toggle", () => toggleAlChartMode());
+      return;
+    }
+    runTrackedAction("al-chart-mode-ratio", () => setAlChartMode("ratio"));
+  });
+  el.alChartModeToggle.addEventListener("click", () => {
+    runTrackedAction("al-chart-mode-toggle", () => toggleAlChartMode());
+  });
   syncAlChartModeUI();
+}
+
+if (el.alChartSeparateAxes) {
+  el.alChartSeparateAxes.checked = alChartSeparateAxes;
+  el.alChartSeparateAxes.addEventListener("change", () => {
+    alChartSeparateAxes = Boolean(el.alChartSeparateAxes.checked);
+    localStorage.setItem(AL_CHART_AXES_MODE_KEY, alChartSeparateAxes ? "separate" : "shared");
+    renderChartsOnly();
+  });
 }
 
 if (el.netChartSeparateAxes) {
@@ -1022,7 +1063,7 @@ function trackedStateSnapshot() {
     chartRange: structuredClone(chartRange),
     excludedAssets: Array.from(excludedAssets).sort(),
     excludedLiabilities: Array.from(excludedLiabilities).sort(),
-    currentTheme,
+    alChartMode,
     editingSnapshotDate,
     hasUnsavedAssetLiabilityChanges
   };
@@ -1047,10 +1088,27 @@ function restoreTrackedState(state) {
   chartRange = structuredClone(state.chartRange || { startDate: null, endDate: null });
   excludedAssets = new Set(state.excludedAssets || []);
   excludedLiabilities = new Set(state.excludedLiabilities || []);
-  if (state.currentTheme && state.currentTheme !== currentTheme) {
-    currentTheme = state.currentTheme;
-    localStorage.setItem(THEME_KEY, currentTheme);
-    applyTheme();
+  if (state.alChartMode === "ratio" || state.alChartMode === "value") {
+    alChartMode = state.alChartMode;
+  }
+  localStorage.setItem(AL_CHART_MODE_KEY, alChartMode);
+  if (el.alModeValueBtn && el.alModeRatioBtn) {
+    const isValue = alChartMode === "value";
+    el.alModeValueBtn.classList.toggle("active", isValue);
+    el.alModeRatioBtn.classList.toggle("active", !isValue);
+    el.alModeValueBtn.setAttribute("aria-pressed", isValue ? "true" : "false");
+    el.alModeRatioBtn.setAttribute("aria-pressed", isValue ? "false" : "true");
+  }
+  if (el.alChartSeparateAxes) {
+    el.alChartSeparateAxes.checked = Boolean(alChartSeparateAxes);
+    const axisDisabled = alChartMode !== "value";
+    el.alChartSeparateAxes.disabled = axisDisabled;
+    el.alChartSeparateAxes.setAttribute("aria-disabled", axisDisabled ? "true" : "false");
+  }
+  if (el.alChartAxisToggleWrap) {
+    const axisDisabled = alChartMode !== "value";
+    el.alChartAxisToggleWrap.classList.toggle("is-disabled", axisDisabled);
+    el.alChartAxisToggleWrap.setAttribute("aria-disabled", axisDisabled ? "true" : "false");
   }
   editingSnapshotDate = state.editingSnapshotDate;
   hasUnsavedAssetLiabilityChanges = Boolean(state.hasUnsavedAssetLiabilityChanges);
@@ -2070,16 +2128,101 @@ async function writeLiveHistoryFile(content, encrypted = false, { strict = false
 }
 
 // Parse my_history.csv text into snapshots array.
-function parseLiveHistoryCsv(text) {
-  if (!text || !text.trim()) return [];
+function parseLiveHistoryCsv(text, { legacyUnitSelections = null } = {}) {
+  if (!text || !text.trim()) {
+    const empty = [];
+    empty._legacyConverted = false;
+    return empty;
+  }
   try {
+    const isLegacy = isLegacyHistoryCsv(text);
     const rows = parseCsv(text);
-    return rows.map((row) => {
-      const yyyymmddDate = String(row.date).trim();
-      const mmddyyDate = yyyymmddToMMDDYY(yyyymmddDate);
+    const parsed = rows.map((row) => {
+      const mmddyyDate = parseCsvDateToMMDDYY(row.date);
+      if (!mmddyyDate) return null;
+
       const btcusd = Number(row.btcusd || historicalPrices[mmddyyDate] || formState.btcusd || 0);
-      const assets = typeof row.assets === "string" ? JSON.parse(row.assets) : (row.assets || []);
-      const liabilities = typeof row.liabilities === "string" ? JSON.parse(row.liabilities) : (row.liabilities || []);
+      let assets = [];
+      let liabilities = [];
+
+      if (isLegacy) {
+        const usdAssets = parseLegacyDictField(row.assets_usd || row.assets);
+        const btcAssets = parseLegacyDictField(row.assets_btc);
+        const usdLiabs = parseLegacyDictField(row.liabilities_usd || row.liabilities);
+        const btcLiabs = parseLegacyDictField(row.liabilities_btc);
+
+        const assetNames = new Set([
+          ...Object.keys(usdAssets || {}),
+          ...Object.keys(btcAssets || {}),
+          ...Object.keys((legacyUnitSelections && legacyUnitSelections.assets) || {})
+        ]);
+        const liabilityNames = new Set([
+          ...Object.keys(usdLiabs || {}),
+          ...Object.keys(btcLiabs || {}),
+          ...Object.keys((legacyUnitSelections && legacyUnitSelections.liabilities) || {})
+        ]);
+
+        const pickRows = (names, usdDict, btcDict, selectedUnits = {}) => {
+          const out = [];
+          names.forEach((rawName) => {
+            const name = String(rawName || "").trim();
+            if (!name) return;
+            const chosen = String(selectedUnits[name] || "USD");
+            const usdValRaw = Number(usdDict?.[name]);
+            const btcValRaw = Number(btcDict?.[name]);
+            let usdVal = Number.isFinite(usdValRaw) ? usdValRaw : NaN;
+            let btcVal = Number.isFinite(btcValRaw) ? btcValRaw : NaN;
+            const fx = Number.isFinite(btcusd) && btcusd > 0 ? btcusd : NaN;
+
+            // Legacy files normally store both USD and BTC dictionaries for the same items.
+            // If one side is missing, derive it from the other using row BTCUSD.
+            if (!Number.isFinite(usdVal) && Number.isFinite(btcVal) && Number.isFinite(fx)) {
+              usdVal = btcVal * fx;
+            }
+            if (!Number.isFinite(btcVal) && Number.isFinite(usdVal) && Number.isFinite(fx)) {
+              btcVal = usdVal / fx;
+            }
+
+            let value = 0;
+            let unit = "USD";
+
+            if (chosen === "BTC") {
+              unit = "BTC";
+              value = Number.isFinite(btcVal) ? btcVal : 0;
+            } else if (chosen === "sats") {
+              unit = "sats";
+              value = Number.isFinite(btcVal) ? btcVal * 100000000 : 0;
+            } else {
+              unit = "USD";
+              value = Number.isFinite(usdVal) ? usdVal : 0;
+            }
+
+            if (!Number.isFinite(value) || value === 0) return;
+            out.push({ name, value, unit });
+          });
+          return out;
+        };
+
+        assets = pickRows(
+          assetNames,
+          usdAssets,
+          btcAssets,
+          (legacyUnitSelections && legacyUnitSelections.assets) || {}
+        );
+        liabilities = pickRows(
+          liabilityNames,
+          usdLiabs,
+          btcLiabs,
+          (legacyUnitSelections && legacyUnitSelections.liabilities) || {}
+        );
+      } else {
+        assets = typeof row.assets === "string" ? JSON.parse(row.assets) : (row.assets || []);
+        liabilities = typeof row.liabilities === "string" ? JSON.parse(row.liabilities) : (row.liabilities || []);
+      }
+
+      if (!Array.isArray(assets)) assets = [];
+      if (!Array.isArray(liabilities)) liabilities = [];
+
       return {
         date: mmddyyDate,
         timestamp: row.timestamp || parseMMDDYY(mmddyyDate).toISOString(),
@@ -2089,9 +2232,14 @@ function parseLiveHistoryCsv(text) {
         comments: row.comment || row.comments || "",
         totals: computeTotals(assets, liabilities, btcusd)
       };
-    });
+    }).filter(Boolean);
+
+    parsed._legacyConverted = isLegacy;
+    return parsed;
   } catch {
-    return [];
+    const empty = [];
+    empty._legacyConverted = false;
+    return empty;
   }
 }
 
@@ -2118,6 +2266,202 @@ function csvHeaderNames(text) {
   return parseCsvRow(lines[0]).map((h) => String(h || "").trim().replace(/^\uFEFF/, "").toLowerCase());
 }
 
+function isLegacyHistoryCsv(text) {
+  const headers = csvHeaderNames(text);
+  if (!headers.length) return false;
+  return headers.includes("assets_usd")
+    || headers.includes("liabilities_usd")
+    || headers.includes("assets_btc")
+    || headers.includes("liabilities_btc");
+}
+
+function parseCsvDateToMMDDYY(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  if (/^\d{8}$/.test(raw)) return yyyymmddToMMDDYY(raw);
+
+  const slash = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/);
+  if (slash) {
+    const mm = String(Number(slash[1])).padStart(2, "0");
+    const dd = String(Number(slash[2])).padStart(2, "0");
+    const yyRaw = String(slash[3]);
+    const yy = yyRaw.length === 4 ? yyRaw.slice(-2) : yyRaw.padStart(2, "0");
+    return `${mm}${dd}${yy}`;
+  }
+
+  const dash = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (dash) {
+    return `${dash[2]}${dash[3]}${dash[1].slice(-2)}`;
+  }
+  return null;
+}
+
+function parseLegacyDictField(rawValue) {
+  if (rawValue && typeof rawValue === "object" && !Array.isArray(rawValue)) return rawValue;
+  const text = String(rawValue || "").trim();
+  if (!text) return {};
+
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+  } catch {
+    // Fall through and try Python-dict style parsing.
+  }
+
+  try {
+    const normalized = text
+      .replace(/([{,]\s*)'([^']*)'\s*:/g, '$1"$2":')
+      .replace(/:\s*'([^']*)'/g, ': "$1"');
+    const parsed = JSON.parse(normalized);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+  } catch {
+    // Ignore malformed dictionaries.
+  }
+  return {};
+}
+
+function legacyDictToUsdRows(dictLike) {
+  const dict = parseLegacyDictField(dictLike);
+  return Object.entries(dict)
+    .map(([name, value]) => ({
+      name: String(name || "").trim(),
+      value: Number(value),
+      unit: "USD"
+    }))
+    .filter((row) => row.name && Number.isFinite(row.value) && row.value !== 0);
+}
+
+function collectLegacyFieldNames(rows, kind) {
+  const usdKey = `${kind}_usd`;
+  const btcKey = `${kind}_btc`;
+  const fallbackKey = kind;
+  const names = new Set();
+  rows.forEach((row) => {
+    const usdDict = parseLegacyDictField(row[usdKey] || row[fallbackKey]);
+    const btcDict = parseLegacyDictField(row[btcKey]);
+    Object.keys(usdDict).forEach((k) => { if (k) names.add(String(k).trim()); });
+    Object.keys(btcDict).forEach((k) => { if (k) names.add(String(k).trim()); });
+  });
+  return Array.from(names).filter(Boolean).sort((a, b) => a.localeCompare(b));
+}
+
+async function promptForLegacyUnitSelections(rawCsv, filename = "") {
+  const rows = parseCsv(rawCsv);
+  const assetNames = collectLegacyFieldNames(rows, "assets");
+  const liabilityNames = collectLegacyFieldNames(rows, "liabilities");
+
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "enc-overlay";
+
+    const box = document.createElement("div");
+    box.className = "enc-dialog legacy-convert-dialog";
+
+    const title = document.createElement("p");
+    title.className = "legacy-convert-title";
+    title.textContent = "Legacy file detected";
+    box.appendChild(title);
+
+    const msg = document.createElement("p");
+    msg.textContent = `${filename || "This file"} uses the old dashboard format. Choose units for each item before conversion.`;
+    box.appendChild(msg);
+
+    const makeSection = (headingText, names) => {
+      const section = document.createElement("div");
+      section.className = "legacy-convert-section";
+
+      const heading = document.createElement("div");
+      heading.className = "legacy-convert-heading";
+      heading.textContent = headingText;
+      section.appendChild(heading);
+
+      if (!names.length) {
+        const empty = document.createElement("div");
+        empty.className = "legacy-convert-empty";
+        empty.textContent = "No items found";
+        section.appendChild(empty);
+        return { section, selects: new Map() };
+      }
+
+      const list = document.createElement("div");
+      list.className = "legacy-convert-list";
+      const selects = new Map();
+      names.forEach((name) => {
+        const row = document.createElement("label");
+        row.className = "legacy-convert-row";
+
+        const nameEl = document.createElement("span");
+        nameEl.className = "legacy-convert-name";
+        nameEl.textContent = name;
+
+        const sel = document.createElement("select");
+        sel.className = "legacy-convert-select";
+        ["USD", "BTC", "sats"].forEach((unit) => {
+          const opt = document.createElement("option");
+          opt.value = unit;
+          opt.textContent = unit;
+          if (unit === "USD") opt.selected = true;
+          sel.appendChild(opt);
+        });
+
+        row.appendChild(nameEl);
+        row.appendChild(sel);
+        list.appendChild(row);
+        selects.set(name, sel);
+      });
+      section.appendChild(list);
+      return { section, selects };
+    };
+
+    const assetsSection = makeSection("Assets", assetNames);
+    const liabsSection = makeSection("Liabilities", liabilityNames);
+    box.appendChild(assetsSection.section);
+    box.appendChild(liabsSection.section);
+
+    const btnRow = document.createElement("div");
+    btnRow.className = "enc-btn-row";
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.className = "enc-btn enc-btn-cancel";
+    cancelBtn.type = "button";
+
+    const okBtn = document.createElement("button");
+    okBtn.textContent = "Convert File";
+    okBtn.className = "enc-btn enc-btn-ok";
+    okBtn.type = "button";
+
+    btnRow.appendChild(cancelBtn);
+    btnRow.appendChild(okBtn);
+    box.appendChild(btnRow);
+
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    const cleanup = (val) => {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      resolve(val);
+    };
+
+    cancelBtn.addEventListener("click", () => cleanup(null));
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) cleanup(null); });
+
+    okBtn.addEventListener("click", () => {
+      const selected = {
+        assets: {},
+        liabilities: {}
+      };
+      assetsSection.selects.forEach((sel, name) => {
+        selected.assets[name] = sel.value || "USD";
+      });
+      liabsSection.selects.forEach((sel, name) => {
+        selected.liabilities[name] = sel.value || "USD";
+      });
+      cleanup(selected);
+    });
+  });
+}
+
 function hasCommentCsvColumn(text) {
   const headers = csvHeaderNames(text);
   return headers.includes("comment") || headers.includes("comments");
@@ -2127,7 +2471,9 @@ async function migrateCsvToIncludeCommentColumnIfMissing(rawCsv, parsedSnapshots
   encrypted = false,
   filename = null
 } = {}) {
-  if (hasCommentCsvColumn(rawCsv)) return;
+  const needsLegacyUpgrade = isLegacyHistoryCsv(rawCsv);
+  const needsCommentUpgrade = !hasCommentCsvColumn(rawCsv);
+  if (!needsLegacyUpgrade && !needsCommentUpgrade) return;
 
   const csv = snapshotsToCsv(Array.isArray(parsedSnapshots) ? parsedSnapshots : []);
   if (encrypted) {
@@ -2139,6 +2485,24 @@ async function migrateCsvToIncludeCommentColumnIfMissing(rawCsv, parsedSnapshots
   }
 }
 
+async function parseHistoryCsvWithLegacyPrompt(rawCsv, filename, { encrypted = false } = {}) {
+  if (!isLegacyHistoryCsv(rawCsv)) {
+    return { parsed: parseLiveHistoryCsv(rawCsv), cancelled: false };
+  }
+
+  const selections = await promptForLegacyUnitSelections(rawCsv, filename);
+  if (!selections) {
+    return { parsed: [], cancelled: true };
+  }
+
+  const parsed = parseLiveHistoryCsv(rawCsv, { legacyUnitSelections: selections });
+  await migrateCsvToIncludeCommentColumnIfMissing(rawCsv, parsed, {
+    encrypted,
+    filename
+  });
+  return { parsed, cancelled: false };
+}
+
 // Load live snapshots from server (or fall back to localStorage).
 async function loadLiveSnapshotsFromServer() {
   const isEncrypted = liveHistoryFile.endsWith(".enc");
@@ -2147,11 +2511,9 @@ async function loadLiveSnapshotsFromServer() {
     return [];
   }
   if (!isEncrypted) {
-    const parsed = parseLiveHistoryCsv(raw);
-    await migrateCsvToIncludeCommentColumnIfMissing(raw, parsed, {
-      encrypted: false,
-      filename: liveHistoryFile
-    });
+    const result = await parseHistoryCsvWithLegacyPrompt(raw, liveHistoryFile, { encrypted: false });
+    if (result.cancelled) return [];
+    const parsed = result.parsed;
     if (parsed.length > 0) {
       // Sync to localStorage so offline access works
       localStorage.setItem(STORE_KEY_LIVE, JSON.stringify(parsed));
@@ -2162,11 +2524,9 @@ async function loadLiveSnapshotsFromServer() {
   if (!liveEncryptionPassword) return [];
   try {
     const plain = await decryptText(raw, liveEncryptionPassword);
-    const parsed = parseLiveHistoryCsv(plain);
-    await migrateCsvToIncludeCommentColumnIfMissing(plain, parsed, {
-      encrypted: true,
-      filename: liveHistoryFile
-    });
+    const result = await parseHistoryCsvWithLegacyPrompt(plain, liveHistoryFile, { encrypted: true });
+    if (result.cancelled) return [];
+    const parsed = result.parsed;
     return parsed;
   } catch {
     return [];
@@ -2187,11 +2547,9 @@ async function loadLiveSnapshotsFromStaticCsv(filenameOverride = null) {
     }
     if (!res.ok) return [];
     const raw = await res.text();
-    const parsed = parseLiveHistoryCsv(raw);
-    await migrateCsvToIncludeCommentColumnIfMissing(raw, parsed, {
-      encrypted: false,
-      filename: file
-    });
+    const result = await parseHistoryCsvWithLegacyPrompt(raw, file, { encrypted: false });
+    if (result.cancelled) return [];
+    const parsed = result.parsed;
     if (parsed.length > 0) {
       liveHistoryFile = file;
       persistLiveFileSelection(file);
@@ -2400,7 +2758,9 @@ async function switchLiveFile(filename) {
     if (raw !== null) {
       try {
         const plain = await decryptText(raw, pw);
-        snapshots = parseLiveHistoryCsv(plain);
+        const result = await parseHistoryCsvWithLegacyPrompt(plain, filename, { encrypted: true });
+        if (result.cancelled) return;
+        snapshots = result.parsed;
       } catch {
         setLiveAccessLocked();
         await populateLiveFileMenu();
@@ -2419,7 +2779,13 @@ async function switchLiveFile(filename) {
     el.liveEncryptionEnabled.checked = true;
   } else {
     const raw = await fetchLiveHistoryFile(filename);
-    snapshots = raw !== null ? parseLiveHistoryCsv(raw) : [];
+    if (raw !== null) {
+      const result = await parseHistoryCsvWithLegacyPrompt(raw, filename, { encrypted: false });
+      if (result.cancelled) return;
+      snapshots = result.parsed;
+    } else {
+      snapshots = [];
+    }
     liveHistoryFile = filename;
     persistLiveFileSelection(liveHistoryFile);
     liveAccessLocked = false;
@@ -2922,6 +3288,28 @@ function propagateNameRenameAcrossSnapshots(rowKey, oldNameRaw, newNameRaw, curr
   }
 }
 
+function propagateUnitChangeAcrossSnapshots(rowKey, rowNameRaw, oldUnitRaw, newUnitRaw, currentDate) {
+  const rowName = String(rowNameRaw || "").trim();
+  const oldUnit = normalizeUnit(oldUnitRaw);
+  const newUnit = normalizeUnit(newUnitRaw);
+  if (!rowName || oldUnit === newUnit) return;
+
+  if (rowKey !== "assets" && rowKey !== "liabilities") return;
+
+  for (const snap of snapshots) {
+    if (snap.date === currentDate) continue;
+    const datePrice = Number(snap.btcusd || historicalPrices[snap.date] || activeBtcusd());
+    for (const row of (snap[rowKey] || [])) {
+      if (String(row.name || "").trim() !== rowName) continue;
+      const sourceAmount = typeof row.value !== "undefined" ? row.value : row.amount;
+      const converted = convertAmountBetweenUnits(sourceAmount, oldUnit, newUnit, datePrice);
+      if (typeof row.value !== "undefined") row.value = converted;
+      else row.amount = converted;
+      row.unit = newUnit;
+    }
+  }
+}
+
 function persistSnapshotForActiveSelection({ render = true, onlyIfDirty = false, trackAction = true, actionLabel = "snapshot-update" } = {}) {
   if (currentMode === "live" && (liveAccessLocked || !liveHistoryFile)) {
     if (render) {
@@ -3190,6 +3578,32 @@ function formatAmountInputValue(amount, unit) {
   return parsed.toFixed(decimalsForUnit(unit));
 }
 
+function convertAmountBetweenUnits(amount, fromUnitRaw, toUnitRaw, btcusdRaw) {
+  const fromUnit = normalizeUnit(fromUnitRaw);
+  const toUnit = normalizeUnit(toUnitRaw);
+  const parsedAmount = parseRowAmount(amount);
+  if (!Number.isFinite(parsedAmount)) return amount;
+  if (fromUnit === toUnit) return parsedAmount;
+
+  const datePrice = Number(btcusdRaw);
+  let nextAmount = parsedAmount;
+  if (fromUnit === "BTC" && toUnit === "sats") {
+    nextAmount = Math.round(parsedAmount * 1e8);
+  } else if (fromUnit === "sats" && toUnit === "BTC") {
+    nextAmount = Number((parsedAmount / 1e8).toFixed(8));
+  } else if (fromUnit === "BTC" && toUnit === "USD" && datePrice > 0) {
+    nextAmount = Number((parsedAmount * datePrice).toFixed(2));
+  } else if (fromUnit === "USD" && toUnit === "BTC" && datePrice > 0) {
+    nextAmount = Number((parsedAmount / datePrice).toFixed(8));
+  } else if (fromUnit === "sats" && toUnit === "USD" && datePrice > 0) {
+    nextAmount = Number(((parsedAmount / 1e8) * datePrice).toFixed(2));
+  } else if (fromUnit === "USD" && toUnit === "sats" && datePrice > 0) {
+    nextAmount = Math.round((parsedAmount / datePrice) * 1e8);
+  }
+
+  return nextAmount;
+}
+
 function renderEditor(container, key) {
   container.innerHTML = "";
   formState[key].forEach((row, idx) => {
@@ -3395,6 +3809,7 @@ function renderEditor(container, key) {
         pendingRowFieldFocus = { key, idx, field: "amount" };
         const before = trackedStateSnapshot();
         runTrackedActionFromBefore(`${key}-unit-edit`, before, () => {
+          const rowName = String(formState[key][idx].name || "").trim();
           const prevUnit = normalizeUnit(formState[key][idx].unit);
           const nextUnit = normalizeUnit(unit.value);
           let nextAmount = formState[key][idx].amount;
@@ -3403,22 +3818,12 @@ function renderEditor(container, key) {
           const isFresh = Boolean(formState[key][idx]._fresh);
           if (!isFresh && Number.isFinite(parsedAmount)) {
             const datePrice = Number(historicalPrices[editingSnapshotDate]) || activeBtcusd();
-            if (prevUnit === "BTC" && nextUnit === "sats") {
-              nextAmount = Math.round(parsedAmount * 1e8);
-            } else if (prevUnit === "sats" && nextUnit === "BTC") {
-              nextAmount = Number((parsedAmount / 1e8).toFixed(8));
-            } else if (prevUnit === "BTC" && nextUnit === "USD" && datePrice > 0) {
-              nextAmount = Number((parsedAmount * datePrice).toFixed(2));
-            } else if (prevUnit === "USD" && nextUnit === "BTC" && datePrice > 0) {
-              nextAmount = Number((parsedAmount / datePrice).toFixed(8));
-            } else if (prevUnit === "sats" && nextUnit === "USD" && datePrice > 0) {
-              nextAmount = Number(((parsedAmount / 1e8) * datePrice).toFixed(2));
-            } else if (prevUnit === "USD" && nextUnit === "sats" && datePrice > 0) {
-              nextAmount = Math.round((parsedAmount / datePrice) * 1e8);
-            }
+            nextAmount = convertAmountBetweenUnits(parsedAmount, prevUnit, nextUnit, datePrice);
           }
           formState[key][idx].amount = nextAmount;
           formState[key][idx].unit = nextUnit;
+          const targetDate = editingSnapshotDate || mmddyy(new Date());
+          propagateUnitChangeAcrossSnapshots(key, rowName, prevUnit, nextUnit, targetDate);
           // Update the amount input display to match new unit formatting
           amount.step = stepForUnit(nextUnit);
           amount.value = formatAmountInputValue(nextAmount, nextUnit);
@@ -4227,12 +4632,18 @@ function niceTicks(lo, hi, targetCount = 5) {
   const roughStep = range / Math.max(targetCount - 1, 1);
   const mag = Math.pow(10, Math.floor(Math.log10(roughStep)));
   const norm = roughStep / mag;
-  let niceNorm;
-  if (norm <= 1) niceNorm = 1;
-  else if (norm <= 2) niceNorm = 2;
-  else if (norm <= 2.5) niceNorm = 2.5;
-  else if (norm <= 5) niceNorm = 5;
-  else niceNorm = 10;
+  const ladder = [1, 2, 2.5, 5, 10];
+  // Choose the nearest "nice" step to avoid abrupt jumps when range changes slightly.
+  let niceNorm = ladder[0];
+  let minDelta = Math.abs(norm - niceNorm);
+  for (let i = 1; i < ladder.length; i++) {
+    const candidate = ladder[i];
+    const delta = Math.abs(norm - candidate);
+    if (delta < minDelta || (Math.abs(delta - minDelta) < 1e-9 && candidate < niceNorm)) {
+      minDelta = delta;
+      niceNorm = candidate;
+    }
+  }
   const step = niceNorm * mag;
   const tMin = Math.floor(lo / step) * step;
   const tMax = Math.ceil(hi / step) * step;
@@ -4338,6 +4749,7 @@ function buildAxisScale(values, {
   paddingMaxPct = null,
   targetTicks = 5,
   includeZeroTick = false,
+  includeZeroTickIfInRange = false,
   minZero = false
 } = {}) {
   const nums = (values || []).map(Number).filter((v) => Number.isFinite(v));
@@ -4376,6 +4788,9 @@ function buildAxisScale(values, {
   const eps = 1e-9;
   const ticks = rawTicks.filter((t) => t >= dataMin - eps && t <= dataMax + eps);
   if (includeZeroTick && !ticks.some((t) => Math.abs(t) < eps)) ticks.push(0);
+  if (!includeZeroTick && includeZeroTickIfInRange && dataMin <= eps && dataMax >= -eps && !ticks.some((t) => Math.abs(t) < eps)) {
+    ticks.push(0);
+  }
   ticks.sort((a, b) => a - b);
 
   return {
@@ -4431,6 +4846,7 @@ function drawLineChart(canvas, datasets, labels, opts = {}) {
     paddingMinPct: opts.axisPaddingMinPct,
     paddingMaxPct: opts.axisPaddingMaxPct,
     includeZeroTick: Boolean(opts.includeZeroTick),
+    includeZeroTickIfInRange: Boolean(opts.includeZeroTickIfInRange),
     minZero: Boolean(opts.minZero)
   });
   const ticks = axis.ticks;
@@ -4671,6 +5087,7 @@ function drawLineChartDualYAxis(canvas, datasets, labels, opts = {}) {
     paddingMinPct: opts.axisPaddingMinPct,
     paddingMaxPct: opts.axisPaddingMaxPct,
     includeZeroTick: Boolean(opts.includeZeroTick),
+    includeZeroTickIfInRange: Boolean(opts.includeZeroTickIfInRange),
     minZero: Boolean(opts.minZero)
   });
   const rightAxis = opts.rightAxisScale || buildAxisScale(datasets[1].values, {
@@ -4678,6 +5095,7 @@ function drawLineChartDualYAxis(canvas, datasets, labels, opts = {}) {
     paddingMinPct: opts.axisPaddingMinPct,
     paddingMaxPct: opts.axisPaddingMaxPct,
     includeZeroTick: Boolean(opts.includeZeroTick),
+    includeZeroTickIfInRange: Boolean(opts.includeZeroTickIfInRange),
     minZero: Boolean(opts.minZero)
   });
 
@@ -4685,6 +5103,7 @@ function drawLineChartDualYAxis(canvas, datasets, labels, opts = {}) {
     const scale = buildAxisScale([min, max], {
       paddingPct: 0,
       includeZeroTick: Boolean(opts.includeZeroTick),
+      includeZeroTickIfInRange: Boolean(opts.includeZeroTickIfInRange),
       minZero: Boolean(opts.minZero)
     });
     axis.dataMin = scale.dataMin;
@@ -4954,7 +5373,7 @@ function renderAssetLiabilityChart(chartSnapshots = snapshots) {
   if (el.alChartTitle) {
     el.alChartTitle.textContent = alChartMode === "ratio"
       ? "Liabilities-to-Assets Ratio"
-      : "Assets & Liabilities Valued in BTC";
+      : "Assets & Liabilities";
   }
 
   if (alChartMode === "ratio") {
@@ -5059,11 +5478,10 @@ function renderAssetLiabilityChart(chartSnapshots = snapshots) {
   ];
 
   renderChartLegendRow(el.alChartLegend, datasets);
-
-  drawLineChart(el.alChart, datasets, labels, {
-    minZero: true,
+  const chartOpts = {
     axisPaddingMinPct: 0.05,
     axisPaddingMaxPct: 0.01,
+    includeZeroTickIfInRange: true,
     drawLegend: false,
     historyMarkerDates: markerDates,
     selectedHistoryDate: editingSnapshotDate,
@@ -5072,7 +5490,18 @@ function renderAssetLiabilityChart(chartSnapshots = snapshots) {
     ...(useSats
       ? { yTickFormatter: (v) => formatSatsCompact(Math.round(v * 1e8)) }
       : { yTickSuffix: " BTC" })
-  });
+  };
+
+  if (alChartSeparateAxes) {
+    drawLineChartDualYAxis(el.alChart, datasets, labels, {
+      ...chartOpts,
+      leftAxisColor: datasets[0].color,
+      rightAxisColor: datasets[1].color,
+      ...(useSats ? { yTickFormatter: (v) => formatSatsCompact(Math.round(v * 1e8)) } : {})
+    });
+  } else {
+    drawLineChart(el.alChart, datasets, labels, chartOpts);
+  }
 }
 
 function renderNetChangeChart(chartSnapshots = snapshots) {

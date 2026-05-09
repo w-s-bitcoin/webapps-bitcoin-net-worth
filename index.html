@@ -171,10 +171,16 @@
         </article>
         <article class="card chart-card">
           <div class="chart-card-header">
-            <h2 id="alChartTitle">Assets & Liabilities Valued in BTC</h2>
-            <div id="alChartModeToggle" class="chart-mode-toggle" role="group" aria-label="Assets and liabilities chart mode">
-              <button id="alModeValueBtn" class="chart-mode-btn active" type="button" aria-pressed="true">BTC Value</button>
-              <button id="alModeRatioBtn" class="chart-mode-btn" type="button" aria-pressed="false">LTA Ratio</button>
+            <h2 id="alChartTitle">Assets & Liabilities</h2>
+            <div class="al-chart-controls">
+              <label id="alChartAxisToggleWrap" class="net-axis-toggle" for="alChartSeparateAxes" title="Scale each line on its own y-axis">
+                <input id="alChartSeparateAxes" type="checkbox" />
+                <span>Separate Y-axes</span>
+              </label>
+              <div id="alChartModeToggle" class="chart-mode-toggle" role="group" aria-label="Assets and liabilities chart mode">
+                <button id="alModeValueBtn" class="chart-mode-btn active" type="button" aria-pressed="true">BTC Value</button>
+                <button id="alModeRatioBtn" class="chart-mode-btn" type="button" aria-pressed="false">LTA Ratio</button>
+              </div>
             </div>
           </div>
           <div id="alChartLegend" class="chart-legend-row" aria-label="Assets and liabilities legend"></div>

@@ -31,6 +31,7 @@
   --snapshot-highlight-ring: rgba(102, 178, 255, 0.22);
   --networth-usd-line: #d7dde3;
   --add-btn-color: #ffffff;
+  --top-kpi-panel-height: 96px;
   --tall-panel-height: clamp(420px, 52vh, 560px);
 }
 
@@ -590,10 +591,28 @@ body.light-theme .filter-checkbox-item:hover {
 
 .price-card {
   min-width: 270px;
-  padding: 7px 12px 8px;
+  min-height: var(--top-kpi-panel-height);
+  height: var(--top-kpi-panel-height);
+  padding: 12px 12px 6px;
   display: grid;
-  gap: 1px;
+  grid-template-rows: 1.1em auto 1.1em;
+  align-content: start;
+  gap: 0px;
   position: relative;
+}
+
+#realPriceCard .label {
+  line-height: 1.1;
+  min-height: 1.1em;
+  padding-right: 38px;
+  overflow: hidden;
+}
+
+#realPriceCard .stamp {
+  min-height: 1.1em;
+  font-size: 0.82rem;
+  line-height: 1.1;
+  margin-top: 4px;
 }
 
 .price-card.active {
@@ -603,7 +622,7 @@ body.light-theme .filter-checkbox-item:hover {
 
 .refresh-btn {
   position: absolute;
-  top: 10px;
+  top: 7px;
   right: 10px;
   border: 1px solid rgba(255, 255, 255, 0.18);
   background: rgba(255, 255, 255, 0.06);
@@ -644,7 +663,7 @@ body.light-theme .filter-checkbox-item:hover {
   background: rgba(255, 255, 255, 0.06);
   color: var(--text);
   border-radius: 8px;
-  padding: 6px 8px;
+  padding: 2px 4px;
   font-size: 1.45rem;
   font-weight: 700;
   font-family: "Space Grotesk", sans-serif;
@@ -734,6 +753,8 @@ body.light-theme .filter-checkbox-item:hover {
 }
 
 .metric-card {
+  min-height: var(--top-kpi-panel-height);
+  height: var(--top-kpi-panel-height);
   padding: 0 8px 6px 12px;
   display: flex;
   flex-direction: column;
@@ -1200,6 +1221,7 @@ select {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: nowrap;
   gap: 12px;
   min-height: 36px;
   margin-bottom: 3px;
@@ -1208,13 +1230,18 @@ select {
 }
 
 .chart-card-header h2 {
+  flex: 1 1 auto;
   margin-bottom: 0;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: break-word;
 }
 
 .chart-mode-toggle {
   display: inline-flex;
   gap: 0;
-  width: fit-content;
+  width: auto;
+  max-width: 100%;
   align-items: center;
   padding: 3px;
   background: var(--panel);
@@ -1229,6 +1256,8 @@ select {
   font-size: 0.8rem;
   font-weight: 500;
   padding: 4px 16px;
+  white-space: normal;
+  line-height: 1.1;
   border-radius: 999px;
   color: var(--muted);
   cursor: pointer;
@@ -1244,13 +1273,25 @@ select {
   color: var(--accent);
 }
 
+.al-chart-controls {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  gap: 12px;
+  max-width: 100%;
+}
+
 .net-axis-toggle {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  flex: 0 0 auto;
   padding: 0;
   color: var(--muted);
   font-size: 0.87rem;
+  white-space: nowrap;
   user-select: none;
   cursor: pointer;
 }
@@ -1261,6 +1302,15 @@ select {
   accent-color: var(--accent, #f7931a);
   margin: 0;
   cursor: pointer;
+}
+
+.net-axis-toggle.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.net-axis-toggle.is-disabled input[type="checkbox"] {
+  cursor: not-allowed;
 }
 
 .chart-legend-row {
@@ -1581,18 +1631,112 @@ td.history-actions-cell {
   opacity: 0.85;
 }
 
+.legacy-convert-dialog {
+  width: min(680px, 92vw);
+  max-height: 84vh;
+  overflow: auto;
+}
+
+.legacy-convert-title {
+  font-size: 1rem;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.legacy-convert-note {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-top: -2px;
+}
+
+.legacy-convert-section {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+
+.legacy-convert-heading {
+  font-size: 0.8rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 6px;
+}
+
+.legacy-convert-list {
+  display: grid;
+  gap: 6px;
+}
+
+.legacy-convert-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.legacy-convert-name {
+  font-size: 0.9rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.legacy-convert-select {
+  min-height: 28px;
+  padding: 3px 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: var(--text);
+  border-radius: 6px;
+}
+
+.legacy-convert-empty {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+body.light-theme .legacy-convert-select {
+  background: rgba(0, 0, 0, 0.04);
+  border: 1px solid rgba(0, 0, 0, 0.2);
+}
+
 @media (max-width: 980px) {
   .hero {
     flex-direction: column;
   }
 
   .chart-card-header {
-    flex-direction: column;
-    align-items: stretch;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-start;
+    column-gap: 12px;
+    row-gap: 8px;
+    margin-bottom: 8px;
   }
 
-  .net-axis-toggle {
-    align-self: flex-start;
+  .chart-card-header h2 {
+    flex: 1 1 auto;
+    min-width: 0;
+    margin-bottom: 0;
+    margin-right: auto;
+  }
+
+  .chart-card-header > .net-axis-toggle,
+  .chart-card-header > .al-chart-controls {
+    flex: 0 0 auto;
+    max-width: 100%;
+  }
+
+  .al-chart-controls {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    column-gap: 10px;
+    row-gap: 8px;
+    margin-left: 0;
   }
 
   .quote-cards {
