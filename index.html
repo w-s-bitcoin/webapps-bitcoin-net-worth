@@ -161,7 +161,12 @@
         <article class="card chart-card">
           <div class="chart-card-header">
             <h2>Change in Net Worth</h2>
+            <label class="net-axis-toggle" for="netChartSeparateAxes" title="Scale each line on its own y-axis">
+              <input id="netChartSeparateAxes" type="checkbox" />
+              <span>Separate Y-axes</span>
+            </label>
           </div>
+          <div id="netChartLegend" class="chart-legend-row" aria-label="Change in net worth legend"></div>
           <canvas id="netChart" width="1400" height="700"></canvas>
         </article>
         <article class="card chart-card">
@@ -172,6 +177,7 @@
               <button id="alModeRatioBtn" class="chart-mode-btn" type="button" aria-pressed="false">LTA Ratio</button>
             </div>
           </div>
+          <div id="alChartLegend" class="chart-legend-row" aria-label="Assets and liabilities legend"></div>
           <canvas id="alChart" width="1400" height="700"></canvas>
         </article>
       </section>

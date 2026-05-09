@@ -16,6 +16,7 @@ const BTCUSD_CACHE_KEY = "bitcoinNetWorthTrackerBtcusdCacheV1";
 const FILTER_KEY_DEMO = "bitcoinNetWorthTrackerFiltersDemoV1";
 const FILTER_KEY_LIVE = "bitcoinNetWorthTrackerFiltersLiveV1";
 const AL_CHART_MODE_KEY = "bitcoinNetWorthTrackerAlChartModeV1";
+const NET_CHART_AXES_MODE_KEY = "bitcoinNetWorthTrackerNetChartAxesModeV1";
 const QUOTE_AUTO_REFRESH_MS = 60_000;
 const QUOTE_AUTO_REFRESH_OFFSET_MS = 1_000;
 const SERVER_HEARTBEAT_API = "/api/heartbeat";
@@ -176,6 +177,7 @@ let editorRowsFocused = false;
 let lastQuoteRefreshAt = null;
 let suppressNextEditorFocusRestore = false;
 let alChartMode = localStorage.getItem(AL_CHART_MODE_KEY) === "ratio" ? "ratio" : "value";
+let netChartSeparateAxes = localStorage.getItem(NET_CHART_AXES_MODE_KEY) === "separate";
 
 if (currentMode === "demo") {
   formState = freshFormState("demo");
@@ -220,9 +222,12 @@ const el = {
   historyTableBody: document.getElementById("historyTableBody"),
   alChart: document.getElementById("alChart"),
   alChartTitle: document.getElementById("alChartTitle"),
+  alChartLegend: document.getElementById("alChartLegend"),
   alChartModeToggle: document.getElementById("alChartModeToggle"),
   alModeValueBtn: document.getElementById("alModeValueBtn"),
   alModeRatioBtn: document.getElementById("alModeRatioBtn"),
+  netChartSeparateAxes: document.getElementById("netChartSeparateAxes"),
+  netChartLegend: document.getElementById("netChartLegend"),
   netChart: document.getElementById("netChart"),
   themeToggle: document.getElementById("themeToggle"),
   themeDarkBtn: document.getElementById("themeDarkBtn"),
@@ -402,6 +407,15 @@ if (el.alModeValueBtn && el.alModeRatioBtn) {
   el.alModeValueBtn.addEventListener("click", () => setAlChartMode("value"));
   el.alModeRatioBtn.addEventListener("click", () => setAlChartMode("ratio"));
   syncAlChartModeUI();
+}
+
+if (el.netChartSeparateAxes) {
+  el.netChartSeparateAxes.checked = netChartSeparateAxes;
+  el.netChartSeparateAxes.addEventListener("change", () => {
+    netChartSeparateAxes = Boolean(el.netChartSeparateAxes.checked);
+    localStorage.setItem(NET_CHART_AXES_MODE_KEY, netChartSeparateAxes ? "separate" : "shared");
+    renderChartsOnly();
+  });
 }
 
 // ── Global overlay registry (one open at a time) ────────────────────────────
@@ -2072,7 +2086,7 @@ function parseLiveHistoryCsv(text) {
         btcusd,
         assets,
         liabilities,
-        comments: row.comment || "",
+        comments: row.comment || row.comments || "",
         totals: computeTotals(assets, liabilities, btcusd)
       };
     });
@@ -2097,6 +2111,34 @@ function snapshotsToCsv(snaps) {
   return [header, ...rows].join("\n");
 }
 
+function csvHeaderNames(text) {
+  const normalized = String(text || "").replace(/\r\n?/g, "\n");
+  const lines = normalized.split("\n").filter((l) => l.trim());
+  if (!lines.length) return [];
+  return parseCsvRow(lines[0]).map((h) => String(h || "").trim().replace(/^\uFEFF/, "").toLowerCase());
+}
+
+function hasCommentCsvColumn(text) {
+  const headers = csvHeaderNames(text);
+  return headers.includes("comment") || headers.includes("comments");
+}
+
+async function migrateCsvToIncludeCommentColumnIfMissing(rawCsv, parsedSnapshots, {
+  encrypted = false,
+  filename = null
+} = {}) {
+  if (hasCommentCsvColumn(rawCsv)) return;
+
+  const csv = snapshotsToCsv(Array.isArray(parsedSnapshots) ? parsedSnapshots : []);
+  if (encrypted) {
+    if (!liveEncryptionPassword) return;
+    const enc = await encryptText(csv, liveEncryptionPassword);
+    await writeLiveHistoryFile(enc, true, { filename });
+  } else {
+    await writeLiveHistoryFile(csv, false, { filename });
+  }
+}
+
 // Load live snapshots from server (or fall back to localStorage).
 async function loadLiveSnapshotsFromServer() {
   const isEncrypted = liveHistoryFile.endsWith(".enc");
@@ -2106,6 +2148,10 @@ async function loadLiveSnapshotsFromServer() {
   }
   if (!isEncrypted) {
     const parsed = parseLiveHistoryCsv(raw);
+    await migrateCsvToIncludeCommentColumnIfMissing(raw, parsed, {
+      encrypted: false,
+      filename: liveHistoryFile
+    });
     if (parsed.length > 0) {
       // Sync to localStorage so offline access works
       localStorage.setItem(STORE_KEY_LIVE, JSON.stringify(parsed));
@@ -2117,6 +2163,10 @@ async function loadLiveSnapshotsFromServer() {
   try {
     const plain = await decryptText(raw, liveEncryptionPassword);
     const parsed = parseLiveHistoryCsv(plain);
+    await migrateCsvToIncludeCommentColumnIfMissing(plain, parsed, {
+      encrypted: true,
+      filename: liveHistoryFile
+    });
     return parsed;
   } catch {
     return [];
@@ -2138,6 +2188,10 @@ async function loadLiveSnapshotsFromStaticCsv(filenameOverride = null) {
     if (!res.ok) return [];
     const raw = await res.text();
     const parsed = parseLiveHistoryCsv(raw);
+    await migrateCsvToIncludeCommentColumnIfMissing(raw, parsed, {
+      encrypted: false,
+      filename: file
+    });
     if (parsed.length > 0) {
       liveHistoryFile = file;
       persistLiveFileSelection(file);
@@ -3790,9 +3844,12 @@ function drawMetricPieChart(canvas, slices, hoveredIndex, chartType) {
 
   let hoveredStartAngle = null;
   let hoveredEndAngle = null;
+  const seamAngle = -Math.PI / 2;
+  const dividerLineWidth = 0.6;
+  const separatorAngles = [];
   
   // Draw pie slices starting from top (12 o'clock = -Math.PI / 2)
-  let currentAngle = -Math.PI / 2;
+  let currentAngle = seamAngle;
   
   slices.forEach((slice, index) => {
     const sliceAngle = (slice.value / total) * 2 * Math.PI;
@@ -3814,19 +3871,57 @@ function drawMetricPieChart(canvas, slices, hoveredIndex, chartType) {
       hoveredEndAngle = endAngle;
     }
     
-    // Draw separator line at the end of each slice
-    ctx.strokeStyle = themeValue("--pie-slice-divider") || "rgba(255, 255, 255, 0.38)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(centerX, centerY);
-    ctx.lineTo(
-      centerX + Math.cos(endAngle) * radius,
-      centerY + Math.sin(endAngle) * radius
-    );
-    ctx.stroke();
+    // Draw separators only between adjacent slices.
+    // Skip the last edge and draw the seam once after the loop.
+    if (index < slices.length - 1) {
+      separatorAngles.push(endAngle);
+    }
     
     currentAngle = endAngle;
   });
+
+  if (slices.length > 1) {
+    separatorAngles.push(seamAngle);
+
+    const twoPi = 2 * Math.PI;
+    const normalizeAngle = (a) => {
+      let out = a % twoPi;
+      if (out < 0) out += twoPi;
+      return out;
+    };
+
+    const dedupeThreshold = 1.5 / Math.max(radius, 1); // about 1.5px at edge
+    const normalized = separatorAngles.map(normalizeAngle).sort((a, b) => a - b);
+    const unique = [];
+    normalized.forEach((a) => {
+      if (!unique.length || Math.abs(a - unique[unique.length - 1]) > dedupeThreshold) {
+        unique.push(a);
+      }
+    });
+    if (unique.length > 1) {
+      const wrapGap = (unique[0] + twoPi) - unique[unique.length - 1];
+      if (wrapGap <= dedupeThreshold) unique.shift();
+    }
+
+    ctx.strokeStyle = "#000000";
+    ctx.lineWidth = dividerLineWidth;
+    unique.forEach((angle) => {
+      ctx.beginPath();
+      ctx.moveTo(centerX, centerY);
+      ctx.lineTo(
+        centerX + Math.cos(angle) * radius,
+        centerY + Math.sin(angle) * radius
+      );
+      ctx.stroke();
+    });
+  }
+
+  // Outer rim matches divider styling for a clean pie edge in all themes.
+  ctx.beginPath();
+  ctx.arc(centerX, centerY, radius, 0, 2 * Math.PI);
+  ctx.strokeStyle = "#000000";
+  ctx.lineWidth = dividerLineWidth;
+  ctx.stroke();
 
   // Draw hovered slice outline last so it always overlays delimiter lines.
   if (hoveredStartAngle !== null && hoveredEndAngle !== null) {
@@ -3834,7 +3929,7 @@ function drawMetricPieChart(canvas, slices, hoveredIndex, chartType) {
     ctx.moveTo(centerX, centerY);
     ctx.arc(centerX, centerY, radius, hoveredStartAngle, hoveredEndAngle);
     ctx.closePath();
-    ctx.strokeStyle = "#ffffff";
+    ctx.strokeStyle = "#000000";
     ctx.lineWidth = 1.5;
     ctx.stroke();
   }
@@ -4237,6 +4332,62 @@ function formatChartTooltipValue(v, isPercent) {
   return Number(v).toFixed(6);
 }
 
+function buildAxisScale(values, {
+  paddingPct = 0,
+  paddingMinPct = null,
+  paddingMaxPct = null,
+  targetTicks = 5,
+  includeZeroTick = false,
+  minZero = false
+} = {}) {
+  const nums = (values || []).map(Number).filter((v) => Number.isFinite(v));
+  if (!nums.length) {
+    return { dataMin: -1, dataMax: 1, min: -1, max: 1, ticks: [0], step: 1 };
+  }
+
+  let dataMin = Math.min(...nums);
+  let dataMax = Math.max(...nums);
+  if (dataMin === dataMax) {
+    const expand = Math.abs(dataMin) || 1;
+    dataMin -= expand;
+    dataMax += expand;
+  }
+
+  const range = dataMax - dataMin;
+  const defaultPadPct = Math.max(0, Number(paddingPct) || 0);
+  const lowPadPct = paddingMinPct == null ? defaultPadPct : Math.max(0, Number(paddingMinPct) || 0);
+  const highPadPct = paddingMaxPct == null ? defaultPadPct : Math.max(0, Number(paddingMaxPct) || 0);
+  const lowPad = Math.abs(range) * lowPadPct;
+  const highPad = Math.abs(range) * highPadPct;
+  dataMin -= lowPad;
+  dataMax += highPad;
+
+  if (minZero) dataMin = Math.min(0, dataMin);
+  if (includeZeroTick) {
+    if (dataMin > 0) dataMin = 0;
+    if (dataMax < 0) dataMax = 0;
+  }
+  if (dataMin === dataMax) {
+    dataMin -= 1;
+    dataMax += 1;
+  }
+
+  const { ticks: rawTicks, step } = niceTicks(dataMin, dataMax, targetTicks);
+  const eps = 1e-9;
+  const ticks = rawTicks.filter((t) => t >= dataMin - eps && t <= dataMax + eps);
+  if (includeZeroTick && !ticks.some((t) => Math.abs(t) < eps)) ticks.push(0);
+  ticks.sort((a, b) => a - b);
+
+  return {
+    dataMin,
+    dataMax,
+    min: dataMin,
+    max: dataMax,
+    ticks,
+    step
+  };
+}
+
 function drawLineChart(canvas, datasets, labels, opts = {}) {
   const ctx = canvas.getContext("2d");
   const width = canvas.width;
@@ -4275,14 +4426,17 @@ function drawLineChart(canvas, datasets, labels, opts = {}) {
     return;
   }
 
-  let dataMin = Math.min(...allValues);
-  let dataMax = Math.max(...allValues);
-  if (dataMin === dataMax) { dataMin -= 1; dataMax += 1; }
-  if (opts.minZero) dataMin = Math.min(0, dataMin);
-
-  const { ticks, step } = niceTicks(dataMin, dataMax, 5);
-  const min = ticks[0];
-  const max = ticks[ticks.length - 1];
+  const axis = opts.yAxisScale || buildAxisScale(allValues, {
+    paddingPct: opts.axisPaddingPct || 0,
+    paddingMinPct: opts.axisPaddingMinPct,
+    paddingMaxPct: opts.axisPaddingMaxPct,
+    includeZeroTick: Boolean(opts.includeZeroTick),
+    minZero: Boolean(opts.minZero)
+  });
+  const ticks = axis.ticks;
+  const step = axis.step;
+  const min = axis.min;
+  const max = axis.max;
 
   const x0 = pad.l;
   const y0 = height - pad.b;
@@ -4387,16 +4541,18 @@ function drawLineChart(canvas, datasets, labels, opts = {}) {
     }
   });
 
-  // Draw legend in original order so labels match tooltip ordering.
-  datasets.forEach((ds, idx) => {
-    const lx = x0 + 10;
-    const ly = pad.t + 26 + idx * 26;
-    ctx.fillStyle = ds.color || COLORS[idx % COLORS.length];
-    ctx.fillRect(lx, ly - 10, 18, 3);
-    ctx.fillStyle = tooltipText;
-    ctx.font = `${fs(23)}px Space Grotesk`;
-    ctx.fillText(ds.label, lx + 26, ly);
-  });
+  if (opts.drawLegend !== false) {
+    // Draw legend in original order so labels match tooltip ordering.
+    datasets.forEach((ds, idx) => {
+      const lx = x0 + 10;
+      const ly = pad.t + 26 + idx * 26;
+      ctx.fillStyle = ds.color || COLORS[idx % COLORS.length];
+      ctx.fillRect(lx, ly - 10, 18, 3);
+      ctx.fillStyle = tooltipText;
+      ctx.font = `${fs(23)}px Space Grotesk`;
+      ctx.fillText(ds.label, lx + 26, ly);
+    });
+  }
 
   // Draw tooltip on top of everything.
   if (opts.hoveredHistoryDate && labelToIndex.has(opts.hoveredHistoryDate)) {
@@ -4404,6 +4560,296 @@ function drawLineChart(canvas, datasets, labels, opts = {}) {
     const x = chartXAtIndex(i, labels.length, x0, chartW);
 
     // lines: array of segment arrays [{text, color}]
+    const lines = [[{ text: formatDisplayDate(opts.hoveredHistoryDate), color: tooltipTitle }]];
+    datasets.forEach((ds) => {
+      const val = Number(ds.values[i] || 0);
+      const dsColor = ds.color || tooltipText;
+      if (ds.rawValues && ds.rawFormatter) {
+        const rawStr = ds.rawFormatter(ds.rawValues[i]);
+        const pctStr = formatChartTooltipValue(val, true);
+        const pctColor = val >= 0 ? "#39d7a4" : "#ff5555";
+        lines.push([
+          { text: `${rawStr} `, color: dsColor },
+          { text: pctStr, color: pctColor }
+        ]);
+      } else {
+        const pctStr = formatChartTooltipValue(val, Boolean(opts.percent));
+        const pctColor = val >= 0 ? "#39d7a4" : "#ff5555";
+        const valColor = opts.percent
+          ? (opts.percentValueColor || pctColor)
+          : dsColor;
+        const valStr = ds.valueFormatter ? ds.valueFormatter(val) : pctStr;
+        lines.push([{ text: valStr, color: valColor }]);
+      }
+    });
+
+    ctx.font = `${fs(26)}px IBM Plex Mono`;
+    const textW = Math.max(...lines.map((segs) => segs.reduce((w, s) => w + ctx.measureText(s.text).width, 0)));
+    const boxW = textW + 16;
+    const boxH = lines.length * 28 + 14;
+    let boxX = x + 10;
+    if (boxX + boxW > x0 + chartW) boxX = x - boxW - 10;
+    const cursorY = (opts.hoverY != null) ? opts.hoverY : (pad.t + chartH / 2);
+    const boxY = Math.max(pad.t, cursorY - boxH - 14);
+
+    ctx.fillStyle = tooltipBg;
+    ctx.strokeStyle = tooltipBorder;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.rect(boxX, boxY, boxW, boxH);
+    ctx.fill();
+    ctx.stroke();
+
+    lines.forEach((segs, li) => {
+      let xOff = boxX + 8;
+      segs.forEach((seg) => {
+        ctx.fillStyle = seg.color;
+        ctx.fillText(seg.text, xOff, boxY + 26 + li * 28);
+        xOff += ctx.measureText(seg.text).width;
+      });
+    });
+  }
+
+  let xTicks = buildDateLabelTicks(labels, 8);
+  if (!xTicks.length) {
+    const xEvery = Math.max(1, Math.floor(labels.length / 6));
+    xTicks = labels
+      .map((label, i) => ({ label, i }))
+      .filter((p) => p.i % xEvery === 0 || p.i === labels.length - 1)
+      .map((p) => ({ i: p.i, text: p.label }));
+  }
+
+  ctx.fillStyle = chartTick;
+  ctx.font = `${fs(23)}px IBM Plex Mono`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  xTicks.forEach((tick) => {
+    const x = chartXAtIndex(tick.i, labels.length, x0, chartW);
+    ctx.fillText(tick.text, x, y0 + 12);
+  });
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+}
+
+function drawLineChartDualYAxis(canvas, datasets, labels, opts = {}) {
+  const ctx = canvas.getContext("2d");
+  const width = canvas.width;
+  const height = canvas.height;
+  const dpr = window.devicePixelRatio || 1;
+  const pad = {
+    l: Math.round(CHART_PAD.l * Math.min(1, Math.max(0.5, (width / dpr) / 900))),
+    r: 130,
+    t: CHART_PAD.t,
+    b: CHART_PAD.b
+  };
+  const fs = (px) => px;
+  const canvasBg = themeValue("--canvas-bg") || "rgba(0,0,0,0.42)";
+  const chartTick = themeValue("--chart-tick") || "#a2a2a2";
+  const chartGrid = themeValue("--chart-grid") || "rgba(255,255,255,0.14)";
+  const chartAxis = themeValue("--chart-axis") || "rgba(255,255,255,0.28)";
+  const chartMarker = themeValue("--chart-marker") || "#f5f5f5";
+  const tooltipBg = themeValue("--chart-tooltip-bg") || "rgba(10,10,10,0.78)";
+  const tooltipBorder = themeValue("--chart-tooltip-border") || "rgba(255,255,255,0.18)";
+  const tooltipTitle = themeValue("--chart-tooltip-title") || "#f3f3f3";
+  const tooltipText = themeValue("--chart-tooltip-text") || "#d0d0d0";
+  const snapshotHighlightDot = themeValue("--snapshot-highlight-dot") || "#66b2ff";
+  const snapshotHighlightRing = themeValue("--snapshot-highlight-ring") || "rgba(102,178,255,0.22)";
+
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = canvasBg;
+  ctx.fillRect(0, 0, width, height);
+
+  if (!datasets.length || !datasets[0]?.values?.length || !datasets[1]?.values?.length) {
+    ctx.fillStyle = chartTick;
+    ctx.font = `${fs(30)}px Space Grotesk`;
+    ctx.fillText(opts.emptyMessage || "No saved data yet. Add an asset or liability.", 28, 46);
+    return;
+  }
+
+  const leftAxis = opts.leftAxisScale || buildAxisScale(datasets[0].values, {
+    paddingPct: opts.axisPaddingPct || 0,
+    paddingMinPct: opts.axisPaddingMinPct,
+    paddingMaxPct: opts.axisPaddingMaxPct,
+    includeZeroTick: Boolean(opts.includeZeroTick),
+    minZero: Boolean(opts.minZero)
+  });
+  const rightAxis = opts.rightAxisScale || buildAxisScale(datasets[1].values, {
+    paddingPct: opts.axisPaddingPct || 0,
+    paddingMinPct: opts.axisPaddingMinPct,
+    paddingMaxPct: opts.axisPaddingMaxPct,
+    includeZeroTick: Boolean(opts.includeZeroTick),
+    minZero: Boolean(opts.minZero)
+  });
+
+  const resetAxisBounds = (axis, min, max) => {
+    const scale = buildAxisScale([min, max], {
+      paddingPct: 0,
+      includeZeroTick: Boolean(opts.includeZeroTick),
+      minZero: Boolean(opts.minZero)
+    });
+    axis.dataMin = scale.dataMin;
+    axis.dataMax = scale.dataMax;
+    axis.min = scale.min;
+    axis.max = scale.max;
+    axis.ticks = scale.ticks;
+    axis.step = scale.step;
+  };
+
+  if (opts.alignZero) {
+    const globalMin = Math.min(leftAxis.dataMin, rightAxis.dataMin);
+    const globalMax = Math.max(leftAxis.dataMax, rightAxis.dataMax);
+    const denom = globalMax - globalMin;
+    const zeroPos = denom > 0 ? (globalMax / denom) : 0.5;
+
+    const forceZeroPosition = (axis) => {
+      if (zeroPos >= 1) {
+        const forcedMax = Math.max(axis.dataMax, 0);
+        resetAxisBounds(axis, 0, forcedMax === 0 ? 1 : forcedMax);
+        return;
+      }
+      if (zeroPos <= 0) {
+        const forcedMin = Math.min(axis.dataMin, 0);
+        resetAxisBounds(axis, forcedMin === 0 ? -1 : forcedMin, 0);
+        return;
+      }
+
+      const maxNeededForMin = (-axis.dataMin * zeroPos) / (1 - zeroPos);
+      const forcedMax = Math.max(axis.dataMax, maxNeededForMin);
+      const forcedMin = -(forcedMax * (1 - zeroPos)) / zeroPos;
+      resetAxisBounds(axis, forcedMin, forcedMax);
+    };
+
+    forceZeroPosition(leftAxis);
+    forceZeroPosition(rightAxis);
+  }
+
+  const x0 = pad.l;
+  const y0 = height - pad.b;
+  const chartW = width - pad.l - pad.r;
+  const chartH = height - pad.t - pad.b;
+
+  ctx.strokeStyle = chartGrid;
+  ctx.lineWidth = 1;
+  leftAxis.ticks.forEach((tickVal) => {
+    const y = pad.t + ((leftAxis.max - tickVal) / (leftAxis.max - leftAxis.min)) * chartH;
+    ctx.beginPath();
+    ctx.moveTo(x0, y);
+    ctx.lineTo(x0 + chartW, y);
+    ctx.stroke();
+  });
+
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  ctx.font = `${fs(23)}px IBM Plex Mono`;
+  leftAxis.ticks.forEach((tickVal) => {
+    const y = pad.t + ((leftAxis.max - tickVal) / (leftAxis.max - leftAxis.min)) * chartH;
+    const label = opts.yTickFormatter
+      ? opts.yTickFormatter(tickVal, leftAxis.step, 0)
+      : formatTickValue(tickVal, leftAxis.step, Boolean(opts.percent)) + (opts.percent ? "" : (opts.yTickSuffix || ""));
+    ctx.fillStyle = opts.leftAxisColor || datasets[0].color || chartTick;
+    ctx.fillText(label, x0 - 10, y + 1);
+  });
+
+  ctx.textAlign = "left";
+  rightAxis.ticks.forEach((tickVal) => {
+    const y = pad.t + ((rightAxis.max - tickVal) / (rightAxis.max - rightAxis.min)) * chartH;
+    const label = opts.yTickFormatter
+      ? opts.yTickFormatter(tickVal, rightAxis.step, 1)
+      : formatTickValue(tickVal, rightAxis.step, Boolean(opts.percent)) + (opts.percent ? "" : (opts.yTickSuffix || ""));
+    ctx.fillStyle = opts.rightAxisColor || datasets[1].color || chartTick;
+    ctx.fillText(label, x0 + chartW + 10, y + 1);
+  });
+
+  ctx.strokeStyle = chartAxis;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(x0, pad.t);
+  ctx.lineTo(x0, y0);
+  ctx.lineTo(x0 + chartW, y0);
+  ctx.moveTo(x0 + chartW, pad.t);
+  ctx.lineTo(x0 + chartW, y0);
+  ctx.stroke();
+
+  const labelToIndex = new Map(labels.map((d, i) => [d, i]));
+  const markerDates = Array.isArray(opts.historyMarkerDates) ? opts.historyMarkerDates : [];
+  const markerIndices = markerDates
+    .map((d) => labelToIndex.get(d))
+    .filter((i) => Number.isInteger(i));
+  const seenMarker = new Set();
+  ctx.fillStyle = chartMarker;
+  markerIndices.forEach((i) => {
+    if (seenMarker.has(i)) return;
+    seenMarker.add(i);
+    const x = chartXAtIndex(i, labels.length, x0, chartW);
+    ctx.beginPath();
+    ctx.arc(x, y0, 3, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  if (opts.selectedHistoryDate && labelToIndex.has(opts.selectedHistoryDate)) {
+    const i = labelToIndex.get(opts.selectedHistoryDate);
+    const x = chartXAtIndex(i, labels.length, x0, chartW);
+    ctx.fillStyle = snapshotHighlightRing;
+    ctx.beginPath();
+    ctx.arc(x, y0, 10, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = snapshotHighlightDot;
+    ctx.beginPath();
+    ctx.arc(x, y0, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  if (opts.hoveredHistoryDate && labelToIndex.has(opts.hoveredHistoryDate)) {
+    const i = labelToIndex.get(opts.hoveredHistoryDate);
+    const x = chartXAtIndex(i, labels.length, x0, chartW);
+    ctx.strokeStyle = tooltipBorder;
+    ctx.beginPath();
+    ctx.moveTo(x, pad.t);
+    ctx.lineTo(x, y0);
+    ctx.stroke();
+  }
+
+  datasets.slice().reverse().forEach((ds, revIdx) => {
+    const idx = datasets.length - 1 - revIdx;
+    const axis = idx === 0 ? leftAxis : rightAxis;
+    ctx.strokeStyle = ds.color || COLORS[idx % COLORS.length];
+    ctx.lineWidth = 3;
+    if (labels.length > 1) {
+      ctx.beginPath();
+      ds.values.forEach((v, i) => {
+        const x = chartXAtIndex(i, labels.length, x0, chartW);
+        const y = pad.t + ((axis.max - v) / (axis.max - axis.min)) * chartH;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    } else if (ds.values.length === 1) {
+      const x = chartXAtIndex(0, labels.length, x0, chartW);
+      const y = pad.t + ((axis.max - ds.values[0]) / (axis.max - axis.min)) * chartH;
+      ctx.fillStyle = ds.color || COLORS[idx % COLORS.length];
+      ctx.beginPath();
+      ctx.arc(x, y, 5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  });
+
+  if (opts.drawLegend !== false) {
+    datasets.forEach((ds, idx) => {
+      const lx = x0 + 10;
+      const ly = pad.t + 26 + idx * 26;
+      ctx.fillStyle = ds.color || COLORS[idx % COLORS.length];
+      ctx.fillRect(lx, ly - 10, 18, 3);
+      ctx.fillStyle = tooltipText;
+      ctx.font = `${fs(23)}px Space Grotesk`;
+      ctx.textAlign = "left";
+      ctx.textBaseline = "alphabetic";
+      ctx.fillText(ds.label, lx + 26, ly);
+    });
+  }
+
+  if (opts.hoveredHistoryDate && labelToIndex.has(opts.hoveredHistoryDate)) {
+    const i = labelToIndex.get(opts.hoveredHistoryDate);
+    const x = chartXAtIndex(i, labels.length, x0, chartW);
     const lines = [[{ text: formatDisplayDate(opts.hoveredHistoryDate), color: tooltipTitle }]];
     datasets.forEach((ds) => {
       const val = Number(ds.values[i] || 0);
@@ -4484,6 +4930,26 @@ function formatSatsCompact(sats) {
   return sats + " sats";
 }
 
+function renderChartLegendRow(container, datasets = []) {
+  if (!container) return;
+  container.innerHTML = "";
+  datasets.forEach((ds) => {
+    const item = document.createElement("span");
+    item.className = "chart-legend-item";
+
+    const swatch = document.createElement("span");
+    swatch.className = "chart-legend-swatch";
+    swatch.style.backgroundColor = ds.color || themeValue("--chart-tooltip-text") || "#d0d0d0";
+
+    const label = document.createElement("span");
+    label.textContent = String(ds.label || "");
+
+    item.appendChild(swatch);
+    item.appendChild(label);
+    container.appendChild(item);
+  });
+}
+
 function renderAssetLiabilityChart(chartSnapshots = snapshots) {
   if (el.alChartTitle) {
     el.alChartTitle.textContent = alChartMode === "ratio"
@@ -4501,6 +4967,7 @@ function renderAssetLiabilityChart(chartSnapshots = snapshots) {
 
     if (!plottedSnapshots.length) {
       chartInteractionState.alChart = { labels: [], markerDates: [] };
+      renderChartLegendRow(el.alChartLegend, []);
       drawLineChart(el.alChart, [], [], {
         emptyMessage: allAssetsExcluded
           ? "No LTA Ratio to show because all assets are excluded by filters."
@@ -4529,10 +4996,14 @@ function renderAssetLiabilityChart(chartSnapshots = snapshots) {
       }
     ];
 
+    renderChartLegendRow(el.alChartLegend, datasets);
+
     drawLineChart(el.alChart, datasets, labels, {
-      minZero: true,
       percent: true,
       percentValueColor: "#2bb5ff",
+      axisPaddingMinPct: 0.05,
+      axisPaddingMaxPct: 0.01,
+      drawLegend: false,
       historyMarkerDates: markerDates,
       selectedHistoryDate: editingSnapshotDate,
       hoveredHistoryDate: hoveredSnapshotDate,
@@ -4552,6 +5023,7 @@ function renderAssetLiabilityChart(chartSnapshots = snapshots) {
 
   if (!plottedSnapshots.length) {
     chartInteractionState.alChart = { labels: [], markerDates: [] };
+    renderChartLegendRow(el.alChartLegend, []);
     drawLineChart(el.alChart, [], []);
     return;
   }
@@ -4586,8 +5058,13 @@ function renderAssetLiabilityChart(chartSnapshots = snapshots) {
     }
   ];
 
+  renderChartLegendRow(el.alChartLegend, datasets);
+
   drawLineChart(el.alChart, datasets, labels, {
     minZero: true,
+    axisPaddingMinPct: 0.05,
+    axisPaddingMaxPct: 0.01,
+    drawLegend: false,
     historyMarkerDates: markerDates,
     selectedHistoryDate: editingSnapshotDate,
     hoveredHistoryDate: hoveredSnapshotDate,
@@ -4607,6 +5084,7 @@ function renderNetChangeChart(chartSnapshots = snapshots) {
 
   if (!plottedSnapshots.length) {
     chartInteractionState.netChart = { labels: [], markerDates: [] };
+    renderChartLegendRow(el.netChartLegend, []);
     drawLineChart(el.netChart, [], []);
     return;
   }
@@ -4633,13 +5111,36 @@ function renderNetChangeChart(chartSnapshots = snapshots) {
     }
   ];
 
-  drawLineChart(el.netChart, datasets, labels, {
-    percent: true,
-    historyMarkerDates: markerDates,
-    selectedHistoryDate: editingSnapshotDate,
-    hoveredHistoryDate: hoveredSnapshotDate,
-    hoverY: hoveredCanvasY
-  });
+  renderChartLegendRow(el.netChartLegend, datasets);
+
+  if (netChartSeparateAxes) {
+    drawLineChartDualYAxis(el.netChart, datasets, labels, {
+      percent: true,
+      alignZero: true,
+      axisPaddingMinPct: 0.05,
+      axisPaddingMaxPct: 0.01,
+      includeZeroTick: true,
+      drawLegend: false,
+      leftAxisColor: datasets[0].color,
+      rightAxisColor: datasets[1].color,
+      historyMarkerDates: markerDates,
+      selectedHistoryDate: editingSnapshotDate,
+      hoveredHistoryDate: hoveredSnapshotDate,
+      hoverY: hoveredCanvasY
+    });
+  } else {
+    drawLineChart(el.netChart, datasets, labels, {
+      percent: true,
+      axisPaddingMinPct: 0.05,
+      axisPaddingMaxPct: 0.01,
+      includeZeroTick: true,
+      drawLegend: false,
+      historyMarkerDates: markerDates,
+      selectedHistoryDate: editingSnapshotDate,
+      hoveredHistoryDate: hoveredSnapshotDate,
+      hoverY: hoveredCanvasY
+    });
+  }
 }
 
 function parseCsvRow(line) {
@@ -5103,7 +5604,7 @@ async function loadDemoData() {
           btcusd,
           assets,
           liabilities,
-          comments: row.comment || "",
+          comments: row.comment || row.comments || "",
           totals: computeTotals(assets, liabilities, btcusd)
         };
       } catch {
@@ -5112,6 +5613,10 @@ async function loadDemoData() {
     }).filter(Boolean);
 
     if (!parsedSnapshots.length) return false;
+    await migrateCsvToIncludeCommentColumnIfMissing(text, parsedSnapshots, {
+      encrypted: false,
+      filename: "demo_history.csv"
+    });
     snapshots = parsedSnapshots;
     editingSnapshotDate = mmddyy(new Date());
     hasUnsavedAssetLiabilityChanges = false;
