@@ -5101,7 +5101,9 @@ function drawLineChartDualYAxis(canvas, datasets, labels, opts = {}) {
 
   const resetAxisBounds = (axis, min, max) => {
     const scale = buildAxisScale([min, max], {
-      paddingPct: 0,
+      paddingPct: opts.axisPaddingPct || 0,
+      paddingMinPct: opts.axisPaddingMinPct,
+      paddingMaxPct: opts.axisPaddingMaxPct,
       includeZeroTick: Boolean(opts.includeZeroTick),
       includeZeroTickIfInRange: Boolean(opts.includeZeroTickIfInRange),
       minZero: Boolean(opts.minZero)
@@ -5156,6 +5158,20 @@ function drawLineChartDualYAxis(canvas, datasets, labels, opts = {}) {
     ctx.lineTo(x0 + chartW, y);
     ctx.stroke();
   });
+
+  if (opts.rightAxisGridLines !== false) {
+    ctx.save();
+    ctx.strokeStyle = opts.rightAxisGridColor || chartGrid;
+    ctx.lineWidth = 1;
+    rightAxis.ticks.forEach((tickVal) => {
+      const y = pad.t + ((rightAxis.max - tickVal) / (rightAxis.max - rightAxis.min)) * chartH;
+      ctx.beginPath();
+      ctx.moveTo(x0, y);
+      ctx.lineTo(x0 + chartW, y);
+      ctx.stroke();
+    });
+    ctx.restore();
+  }
 
   ctx.textAlign = "right";
   ctx.textBaseline = "middle";
@@ -5460,7 +5476,7 @@ function renderAssetLiabilityChart(chartSnapshots = snapshots) {
   chartInteractionState.alChart = { labels, markerDates };
   const datasets = [
     {
-      label: "Total Assets",
+      label: "Assets",
       color: "#39d7a4",
       values: plottedSnapshots.map((s) => Number(s.totals?.assets_btc || 0)),
       valueFormatter: useSats
@@ -5468,7 +5484,7 @@ function renderAssetLiabilityChart(chartSnapshots = snapshots) {
         : (v) => `${Number(v).toFixed(8)} BTC`
     },
     {
-      label: "Total Liabilities",
+      label: "Liabilities",
       color: "#ff6f86",
       values: plottedSnapshots.map((s) => Number(s.totals?.liabilities_btc || 0)),
       valueFormatter: useSats
@@ -5545,7 +5561,6 @@ function renderNetChangeChart(chartSnapshots = snapshots) {
   if (netChartSeparateAxes) {
     drawLineChartDualYAxis(el.netChart, datasets, labels, {
       percent: true,
-      alignZero: true,
       axisPaddingMinPct: 0.05,
       axisPaddingMaxPct: 0.01,
       includeZeroTick: true,
