@@ -4813,8 +4813,8 @@ function drawLineChart(canvas, datasets, labels, opts = {}) {
   // Canvas buffer is kept in sync with display pixels by ResizeObserver,
   // so font sizes in canvas pixels equal their intended CSS-pixel size.
   const dpr = window.devicePixelRatio || 1;
+  const horizontalScale = Math.min(1, Math.max(0.5, (width / dpr) / 900));
   const pad = {
-    l: Math.round(CHART_PAD.l * Math.min(1, Math.max(0.5, (width / dpr) / 900))),
     r: CHART_PAD.r,
     t: CHART_PAD.t,
     b: CHART_PAD.b
@@ -4856,10 +4856,22 @@ function drawLineChart(canvas, datasets, labels, opts = {}) {
   const step = axis.step;
   const min = axis.min;
   const max = axis.max;
+  const yTickLabelGap = 10;
+  const yTickEdgePad = opts.leftAxisLabelPad ?? 16;
 
-  const x0 = pad.l;
+  ctx.font = `${fs(23)}px IBM Plex Mono`;
+  const yTickLabels = ticks.map((tickVal) => (
+    opts.yTickFormatter
+      ? opts.yTickFormatter(tickVal, step)
+      : formatTickValue(tickVal, step, Boolean(opts.percent)) + (opts.percent ? "" : (opts.yTickSuffix || ""))
+  ));
+  const maxLabelWidth = yTickLabels.reduce((maxWidth, label) => Math.max(maxWidth, ctx.measureText(label).width), 0);
+  const baseLeftPad = Math.round((opts.leftAxisBasePad ?? 92) * horizontalScale);
+  const dynamicLeftPad = Math.max(baseLeftPad, Math.ceil(maxLabelWidth + yTickLabelGap + yTickEdgePad));
+
+  const x0 = dynamicLeftPad;
   const y0 = height - pad.b;
-  const chartW = width - pad.l - pad.r;
+  const chartW = width - dynamicLeftPad - pad.r;
   const chartH = height - pad.t - pad.b;
   if (chartInteractionState[canvas.id]) {
     chartInteractionState[canvas.id].plotX0 = x0;
@@ -4874,17 +4886,14 @@ function drawLineChart(canvas, datasets, labels, opts = {}) {
   ctx.textAlign = "right";
   ctx.textBaseline = "middle";
 
-  ticks.forEach((tickVal) => {
+  ticks.forEach((tickVal, tickIndex) => {
     const y = pad.t + ((max - tickVal) / (max - min)) * chartH;
     ctx.beginPath();
     ctx.moveTo(x0, y);
     ctx.lineTo(x0 + chartW, y);
     ctx.stroke();
 
-    const yTickLabel = opts.yTickFormatter
-      ? opts.yTickFormatter(tickVal, step)
-      : formatTickValue(tickVal, step, Boolean(opts.percent)) + (opts.percent ? "" : (opts.yTickSuffix || ""));
-    ctx.fillText(yTickLabel, x0 - 10, y + 1);
+    ctx.fillText(yTickLabels[tickIndex], x0 - yTickLabelGap, y + 1);
   });
 
   ctx.textAlign = "left";
@@ -5059,9 +5068,8 @@ function drawLineChartDualYAxis(canvas, datasets, labels, opts = {}) {
   const width = canvas.width;
   const height = canvas.height;
   const dpr = window.devicePixelRatio || 1;
+  const horizontalScale = Math.min(1, Math.max(0.5, (width / dpr) / 900));
   const pad = {
-    l: Math.round(CHART_PAD.l * Math.min(1, Math.max(0.5, (width / dpr) / 900))),
-    r: 130,
     t: CHART_PAD.t,
     b: CHART_PAD.b
   };
@@ -5151,9 +5159,32 @@ function drawLineChartDualYAxis(canvas, datasets, labels, opts = {}) {
     forceZeroPosition(rightAxis);
   }
 
-  const x0 = pad.l;
+  ctx.font = `${fs(23)}px IBM Plex Mono`;
+  const leftTickLabels = leftAxis.ticks.map((tickVal) => (
+    opts.yTickFormatter
+      ? opts.yTickFormatter(tickVal, leftAxis.step, 0)
+      : formatTickValue(tickVal, leftAxis.step, Boolean(opts.percent)) + (opts.percent ? "" : (opts.yTickSuffix || ""))
+  ));
+  const rightTickLabels = rightAxis.ticks.map((tickVal) => (
+    opts.yTickFormatter
+      ? opts.yTickFormatter(tickVal, rightAxis.step, 1)
+      : formatTickValue(tickVal, rightAxis.step, Boolean(opts.percent)) + (opts.percent ? "" : (opts.yTickSuffix || ""))
+  ));
+
+  const leftMaxLabelWidth = leftTickLabels.reduce((maxWidth, label) => Math.max(maxWidth, ctx.measureText(label).width), 0);
+  const rightMaxLabelWidth = rightTickLabels.reduce((maxWidth, label) => Math.max(maxWidth, ctx.measureText(label).width), 0);
+  const yTickLabelGap = 10;
+  const leftTickEdgePad = opts.leftAxisLabelPad ?? 16;
+  const rightTickEdgePad = opts.rightAxisLabelPad ?? 16;
+
+  const baseLeftPad = Math.round((opts.leftAxisBasePad ?? 92) * horizontalScale);
+  const baseRightPad = Math.round((opts.rightAxisBasePad ?? 92) * horizontalScale);
+  const dynamicLeftPad = Math.max(baseLeftPad, Math.ceil(leftMaxLabelWidth + yTickLabelGap + leftTickEdgePad));
+  const dynamicRightPad = Math.max(baseRightPad, Math.ceil(rightMaxLabelWidth + yTickLabelGap + rightTickEdgePad));
+
+  const x0 = dynamicLeftPad;
   const y0 = height - pad.b;
-  const chartW = width - pad.l - pad.r;
+  const chartW = width - dynamicLeftPad - dynamicRightPad;
   const chartH = height - pad.t - pad.b;
   if (chartInteractionState[canvas.id]) {
     chartInteractionState[canvas.id].plotX0 = x0;
@@ -5187,23 +5218,17 @@ function drawLineChartDualYAxis(canvas, datasets, labels, opts = {}) {
   ctx.textAlign = "right";
   ctx.textBaseline = "middle";
   ctx.font = `${fs(23)}px IBM Plex Mono`;
-  leftAxis.ticks.forEach((tickVal) => {
+  leftAxis.ticks.forEach((tickVal, tickIndex) => {
     const y = pad.t + ((leftAxis.max - tickVal) / (leftAxis.max - leftAxis.min)) * chartH;
-    const label = opts.yTickFormatter
-      ? opts.yTickFormatter(tickVal, leftAxis.step, 0)
-      : formatTickValue(tickVal, leftAxis.step, Boolean(opts.percent)) + (opts.percent ? "" : (opts.yTickSuffix || ""));
     ctx.fillStyle = opts.leftAxisColor || datasets[0].color || chartTick;
-    ctx.fillText(label, x0 - 10, y + 1);
+    ctx.fillText(leftTickLabels[tickIndex], x0 - yTickLabelGap, y + 1);
   });
 
   ctx.textAlign = "left";
-  rightAxis.ticks.forEach((tickVal) => {
+  rightAxis.ticks.forEach((tickVal, tickIndex) => {
     const y = pad.t + ((rightAxis.max - tickVal) / (rightAxis.max - rightAxis.min)) * chartH;
-    const label = opts.yTickFormatter
-      ? opts.yTickFormatter(tickVal, rightAxis.step, 1)
-      : formatTickValue(tickVal, rightAxis.step, Boolean(opts.percent)) + (opts.percent ? "" : (opts.yTickSuffix || ""));
     ctx.fillStyle = opts.rightAxisColor || datasets[1].color || chartTick;
-    ctx.fillText(label, x0 + chartW + 10, y + 1);
+    ctx.fillText(rightTickLabels[tickIndex], x0 + chartW + yTickLabelGap, y + 1);
   });
 
   ctx.strokeStyle = chartAxis;
@@ -5522,6 +5547,7 @@ function renderAssetLiabilityChart(chartSnapshots = snapshots) {
   if (alChartSeparateAxes) {
     drawLineChartDualYAxis(el.alChart, datasets, labels, {
       ...chartOpts,
+      rightAxisLabelPad: 26,
       leftAxisColor: datasets[0].color,
       rightAxisColor: datasets[1].color,
       ...(useSats ? { yTickFormatter: (v) => formatSatsCompact(Math.round(v * 1e8)) } : {})
