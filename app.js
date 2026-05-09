@@ -1315,14 +1315,17 @@ function nearestHistoryDateForCanvasPoint(canvas, xPx) {
   if (!state || !state.labels.length || !state.markerDates.length) return null;
   const labels = state.labels;
   const labelToIndex = new Map(labels.map((d, i) => [d, i]));
-  const chartW = canvas.width - CHART_PAD.l - CHART_PAD.r;
+  const x0 = Number.isFinite(state.plotX0) ? state.plotX0 : CHART_PAD.l;
+  const chartW = Number.isFinite(state.plotW)
+    ? state.plotW
+    : (canvas.width - CHART_PAD.l - CHART_PAD.r);
   if (chartW <= 0) return null;
 
   let best = null;
   state.markerDates.forEach((date) => {
     const idx = labelToIndex.get(date);
     if (!Number.isInteger(idx)) return;
-    const mx = chartXAtIndex(idx, labels.length, CHART_PAD.l, chartW);
+    const mx = chartXAtIndex(idx, labels.length, x0, chartW);
     const dist = Math.abs(xPx - mx);
     if (!best || dist < best.dist) best = { date, dist };
   });
@@ -4858,6 +4861,10 @@ function drawLineChart(canvas, datasets, labels, opts = {}) {
   const y0 = height - pad.b;
   const chartW = width - pad.l - pad.r;
   const chartH = height - pad.t - pad.b;
+  if (chartInteractionState[canvas.id]) {
+    chartInteractionState[canvas.id].plotX0 = x0;
+    chartInteractionState[canvas.id].plotW = chartW;
+  }
 
   ctx.strokeStyle = chartGrid;
   ctx.lineWidth = 1;
@@ -5041,7 +5048,7 @@ function drawLineChart(canvas, datasets, labels, opts = {}) {
   ctx.textBaseline = "top";
   xTicks.forEach((tick) => {
     const x = chartXAtIndex(tick.i, labels.length, x0, chartW);
-    ctx.fillText(tick.text, x, y0 + 12);
+    ctx.fillText(tick.text, x, y0 + 18);
   });
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
@@ -5148,6 +5155,10 @@ function drawLineChartDualYAxis(canvas, datasets, labels, opts = {}) {
   const y0 = height - pad.b;
   const chartW = width - pad.l - pad.r;
   const chartH = height - pad.t - pad.b;
+  if (chartInteractionState[canvas.id]) {
+    chartInteractionState[canvas.id].plotX0 = x0;
+    chartInteractionState[canvas.id].plotW = chartW;
+  }
 
   ctx.strokeStyle = chartGrid;
   ctx.lineWidth = 1;
@@ -5350,7 +5361,7 @@ function drawLineChartDualYAxis(canvas, datasets, labels, opts = {}) {
   ctx.textBaseline = "top";
   xTicks.forEach((tick) => {
     const x = chartXAtIndex(tick.i, labels.length, x0, chartW);
-    ctx.fillText(tick.text, x, y0 + 12);
+    ctx.fillText(tick.text, x, y0 + 18);
   });
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
