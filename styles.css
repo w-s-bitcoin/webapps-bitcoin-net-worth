@@ -1377,6 +1377,36 @@ th {
   padding-left: 22px;
 }
 
+#historyTableBody td:first-child {
+  padding-left: 5px !important;
+  white-space: nowrap;
+}
+
+.history-toggle-btn {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  margin-right: 6px;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.7rem;
+  line-height: 1;
+  opacity: 0.7;
+  transition: transform 180ms;
+  vertical-align: 1px;
+}
+
+.history-toggle-btn:hover {
+  opacity: 1;
+}
+
+.history-toggle-btn.open {
+  transform: rotate(90deg);
+}
+
 th.history-actions-head,
 td.history-actions-cell {
   width: 50px;
@@ -1388,6 +1418,38 @@ td.history-actions-cell {
   width: 28px;
   padding: 4px 0;
   font-size: 0.95rem;
+}
+
+.history-accordion-row {
+  display: none;
+}
+
+.history-accordion-row.open {
+  display: table-row;
+}
+
+.history-accordion-content {
+  padding: 12px 16px !important;
+  background: rgba(255, 255, 255, 0.02);
+  border-top: 1px solid var(--border);
+}
+
+.snapshot-comment-field {
+  width: 100%;
+  padding: 8px 10px;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.8rem;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  resize: vertical;
+}
+
+.snapshot-comment-field:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--bg2);
 }
 
 /* ── Encryption password dialog ─────────────────────────────────────────── */

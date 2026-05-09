@@ -67,6 +67,7 @@ const DEFAULT_FORM_DEMO = {
   btcusd: 0,
   manualBtcusd: null,
   useManualBtcusd: false,
+  comments: "",
   assets: [
     { name: "bitcoin", amount: 1, unit: "BTC" },
     { name: "cash", amount: 1000, unit: "USD" },
@@ -86,6 +87,7 @@ const DEFAULT_FORM_LIVE = {
   btcusd: 0,
   manualBtcusd: null,
   useManualBtcusd: false,
+  comments: "",
   assets: [],
   liabilities: []
 };
@@ -256,6 +258,11 @@ function syncEditorRowsFocusedFromDom() {
   // Exclude delete buttons from focus tracking - they're in the rows but shouldn't block renders
   if (active.classList?.contains("remove-btn")) {
     editorRowsFocused = false;
+    return;
+  }
+  // Block refresh when a comment field is focused
+  if (active.classList?.contains("snapshot-comment-field")) {
+    editorRowsFocused = true;
     return;
   }
   const wasInAssets = Boolean(el.assetsRows && el.assetsRows.contains(active));
@@ -2065,6 +2072,7 @@ function parseLiveHistoryCsv(text) {
         btcusd,
         assets,
         liabilities,
+        comments: row.comment || "",
         totals: computeTotals(assets, liabilities, btcusd)
       };
     });
@@ -2075,15 +2083,16 @@ function parseLiveHistoryCsv(text) {
 
 // Serialize snapshots to CSV string for my_history.csv.
 function snapshotsToCsv(snaps) {
-  const sorted = snaps.slice().sort((a, b) => parseMMDDYY(a.date) - parseMMDDYY(b.date));
-  const header = "date,assets,liabilities";
+  const sorted = snaps.slice().sort((a, b) => parseMMDDYY(b.date) - parseMMDDYY(a.date));
+  const header = "date,assets,liabilities,comment";
   const rows = sorted.map((s) => {
     const yyyymmdd = mmddyyToInputValue(s.date).replaceAll("-", "");
     const assets = JSON.stringify(s.assets || []);
     const liabilities = JSON.stringify(s.liabilities || []);
+    const comment = String(s.comments || "");
     // CSV-quote each field that may contain commas or quotes
     const q = (v) => `"${String(v).replaceAll('"', '""')}"`;
-    return `${yyyymmdd},${q(assets)},${q(liabilities)}`;
+    return `${yyyymmdd},${q(assets)},${q(liabilities)},${q(comment)}`;
   });
   return [header, ...rows].join("\n");
 }
@@ -2816,6 +2825,7 @@ function normalizedSnapshot(btcusdOverride = null) {
     btcusd,
     assets: uniqueAssets.map((r) => ({ name: r.name, value: r.amount, unit: r.unit })),
     liabilities: uniqueLiabilities.map((r) => ({ name: r.name, value: r.amount, unit: r.unit })),
+    comments: formState.comments || "",
     totals: {
       assets_btc: totalAssetsBtc,
       assets_usd: totalAssetsUsd,
@@ -2972,6 +2982,7 @@ function selectSnapshot(date) {
     amount: parseRowAmount(l.value),
     unit: normalizeUnit(l.unit)
   }));
+  formState.comments = snap.comments || "";
   hasUnsavedAssetLiabilityChanges = false;
   saveForm();
   renderAll();
@@ -3002,6 +3013,7 @@ function addSnapshotForDate(mmddyyDate) {
     btcusd,
     assets,
     liabilities,
+    comments: "",
     totals: computeTotals(assets, liabilities, btcusd)
   };
 
@@ -3465,6 +3477,12 @@ function updateEditorDuplicateWarnings(container, key) {
 }
 
 function renderHistoryTable() {
+  // Preserve which accordion rows are currently open before rebuilding.
+  const openDates = new Set();
+  document.querySelectorAll(".history-accordion-row.open").forEach((row) => {
+    if (row.dataset.snapshotDate) openDates.add(row.dataset.snapshotDate);
+  });
+
   el.historyTableBody.innerHTML = "";
   const today = mmddyy(new Date());
   const historyRows = snapshots
@@ -3482,13 +3500,30 @@ function renderHistoryTable() {
     tr.classList.toggle("active-snapshot", snap.date === editingSnapshotDate);
     tr.title = "Click to load and edit this snapshot";
     tr.innerHTML = `
-      <td>${formatDisplayDate(snap.date)}</td>
+      <td><button class="history-toggle-btn" type="button" title="Show comment" aria-hidden="true">></button>${formatDisplayDate(snap.date)}</td>
       <td>${formatUsd(snap.btcusd)}</td>
       <td>${formatBtc(snap.totals.net_btc)}</td>
       <td>${formatUsd(snap.totals.net_usd)}</td>
       <td class="history-actions-cell"><button class="small-btn history-delete-btn" type="button" title="Delete snapshot" ${snap.synthetic ? 'style="visibility:hidden"' : ""}>×</button></td>
     `;
-    tr.addEventListener("click", () => selectSnapshot(snap.date));
+    tr.addEventListener("click", (e) => {
+      if (!e.target.closest(".history-toggle-btn") && !e.target.closest(".history-delete-btn")) {
+        selectSnapshot(snap.date);
+      }
+    });
+    
+    const toggleBtn = tr.querySelector(".history-toggle-btn");
+    if (toggleBtn) {
+      toggleBtn.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const accordionRow = tr.nextElementSibling;
+        if (accordionRow && accordionRow.classList.contains("history-accordion-row")) {
+          accordionRow.classList.toggle("open");
+          toggleBtn.classList.toggle("open");
+        }
+      });
+    }
+    
     if (!snap.synthetic) {
       const delBtn = tr.querySelector(".history-delete-btn");
       if (delBtn) {
@@ -3499,6 +3534,71 @@ function renderHistoryTable() {
       }
     }
     el.historyTableBody.appendChild(tr);
+    
+    // Add accordion row for comments
+    const accordionRow = document.createElement("tr");
+    accordionRow.classList.add("history-accordion-row");
+    accordionRow.dataset.snapshotDate = snap.date;
+    accordionRow.innerHTML = `
+      <td colspan="6" class="history-accordion-content">
+        <textarea class="snapshot-comment-field" placeholder="Add a comment for this snapshot..." rows="3">${snap.comments || ""}</textarea>
+      </td>
+    `;
+    
+    const commentField = accordionRow.querySelector(".snapshot-comment-field");
+    if (commentField) {
+      commentField.addEventListener("focusin", () => {
+        editorRowsFocused = true;
+        pauseAutoQuoteRefresh();
+        if (quoteRefreshAbortController) quoteRefreshAbortController.abort();
+      });
+      commentField.addEventListener("focusout", () => {
+        setTimeout(() => {
+          syncEditorRowsFocusedFromDom();
+          if (!editorRowsFocused) {
+            flushDeferredQuoteUiRefresh();
+            resumeAutoQuoteRefresh();
+          }
+        }, 0);
+      });
+      commentField.addEventListener("blur", () => {
+        const comment = commentField.value;
+        
+        if (snap.synthetic) {
+          // If synthetic row has a comment, create a real snapshot for today
+          if (!comment.trim()) return;
+          
+          const today = mmddyy(new Date());
+          // Update formState so normalizedSnapshot captures the comment
+          formState.comments = comment;
+          saveForm();
+          editingSnapshotDate = today;
+          // Let persistSnapshotForActiveSelection create the real snapshot from formState
+          persistSnapshotForActiveSelection({ render: false, trackAction: false });
+          // Re-render history table only (preserves open accordions via openDates)
+          renderHistoryTable();
+          return;
+        }
+        
+        const snapIdx = snapshots.findIndex((s) => s.date === snap.date);
+        if (snapIdx >= 0) {
+          snapshots[snapIdx].comments = comment;
+          if (editingSnapshotDate === snap.date) {
+            formState.comments = comment;
+            saveForm();
+          }
+          persistSnapshotForActiveSelection({ render: false, trackAction: false });
+        }
+      });
+    }
+    
+    el.historyTableBody.appendChild(accordionRow);
+
+    // Restore open state if this accordion was open before the re-render.
+    if (openDates.has(snap.date)) {
+      accordionRow.classList.add("open");
+      toggleBtn && toggleBtn.classList.add("open");
+    }
   });
   el.historyCount.textContent = `${snapshots.length} snapshot${snapshots.length === 1 ? "" : "s"}`;
 }
@@ -4416,7 +4516,7 @@ function renderAssetLiabilityChart(chartSnapshots = snapshots) {
 
     const datasets = [
       {
-        label: "Liabilities / Assets",
+        label: "LTA Ratio",
         color: "#2bb5ff",
         values: ratiosPct,
         valueFormatter: (v) => `${Number(v).toFixed(2)}%`
@@ -4997,6 +5097,7 @@ async function loadDemoData() {
           btcusd,
           assets,
           liabilities,
+          comments: row.comment || "",
           totals: computeTotals(assets, liabilities, btcusd)
         };
       } catch {
