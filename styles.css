@@ -2,7 +2,9 @@
   --bg: #000000;
   --bg2: #080808;
   --panel: rgba(8, 8, 8, 0.9);
-  --border: rgba(255, 255, 255, 0.1);
+  --panel-border: rgba(255, 255, 255, 0.14);
+  --panel-border-opaque: #242424;
+  --border: var(--panel-border);
   --text: #eef7ff;
   --muted: #97a7b6;
   --accent: #ff9900;
@@ -36,10 +38,12 @@
 }
 
 body.light-theme {
-  --bg: #f0f0ee;
-  --bg2: #e1e1de;
-  --panel: rgba(255, 255, 255, 0.86);
-  --border: rgba(0, 0, 0, 0.1);
+  --bg: #f4f5f7;
+  --bg2: #f4f5f7;
+  --panel: #ffffff;
+  --panel-border: rgba(0, 0, 0, 0.11);
+  --panel-border-opaque: #e3e3e3;
+  --border: var(--panel-border);
   --text: #121212;
   --muted: #666666;
   --accent: #ff9900;
@@ -81,22 +85,19 @@ html {
 }
 
 html:has(body.light-theme) {
-  background-color: #f0f0ee;
+  background-color: #f4f5f7;
 }
 
 body {
   margin: 0;
   font-family: "Space Grotesk", sans-serif;
   color: var(--text);
-  background: linear-gradient(160deg, var(--bg), var(--bg2));
+  background: var(--bg);
   min-height: 100vh;
 }
 
 body:not(.light-theme) {
-  background:
-    radial-gradient(1200px 500px at 12% -8%, var(--glow-a), transparent 60%),
-    radial-gradient(900px 500px at 92% 5%, var(--glow-b), transparent 56%),
-    linear-gradient(160deg, var(--bg), var(--bg2));
+  background: var(--bg);
 }
 
 .bg-orb {
@@ -105,6 +106,10 @@ body:not(.light-theme) {
   filter: blur(80px);
   opacity: 0.22;
   pointer-events: none;
+}
+
+body.light-theme .bg-orb {
+  display: none;
 }
 
 .orb-a {
@@ -124,36 +129,157 @@ body:not(.light-theme) {
 }
 
 .app-shell {
-  width: calc(100% - 32px);
-  margin: 18px auto 30px;
+  width: 100%;
+  margin: 0 auto;
+  padding: clamp(8px, 1.4vw, 12px);
   display: grid;
-  gap: 14px;
+  gap: 10px;
 }
 
 .hero {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
   align-items: stretch;
+}
+
+.title-panel {
+  position: relative;
+  z-index: 20;
+  overflow: visible;
+  min-width: 0;
+  min-height: var(--top-kpi-panel-height);
+  height: var(--top-kpi-panel-height);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 10px;
+  padding: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  backdrop-filter: blur(6px);
+}
+
+.title-panel:focus-within {
+  border-color: var(--border);
 }
 
 .quote-cards {
   display: grid;
-  grid-template-columns: auto minmax(260px, 1fr);
-  gap: 12px;
+  grid-template-columns: minmax(270px, clamp(270px, 20vw, 380px));
+  gap: 10px;
   align-items: stretch;
+  min-width: 0;
 }
 
 .hero h1 {
   margin: 0;
-  font-size: clamp(1.5rem, 3.8vw, 2.5rem);
+  font-size: clamp(1.05rem, 2vw, 1.5rem);
+  font-weight: 700;
+  letter-spacing: 0.015em;
+  line-height: 1.08;
+}
+
+.title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  position: relative;
+}
+
+.title-heading,
+.title-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.title-actions {
+  margin-left: auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.info-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  z-index: 100;
+}
+
+.info-btn {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.66rem;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.info-btn:hover,
+.info-btn:focus-visible {
+  color: var(--accent);
+  border-color: var(--accent);
+  outline: none;
+}
+
+.info-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 1000;
+  width: clamp(280px, 34vw, 420px);
+  max-width: calc(100vw - 24px);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #000000;
+  color: #d9e5ea;
+  padding: 10px 12px;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  white-space: normal;
+  overflow-wrap: break-word;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translate(var(--info-popover-shift-x, 0px), -2px);
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.35);
+  transition: opacity 120ms ease, transform 120ms ease, visibility 0ms linear 120ms;
+}
+
+.info-wrap:hover .info-popover,
+.info-wrap:focus-within .info-popover {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(var(--info-popover-shift-x, 0px), 0);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+body.light-theme .info-popover {
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.1);
 }
 
 .mode-row {
   display: flex;
   align-items: center;
-  gap: 14px;
-  margin-top: 10px;
+  gap: 10px;
+  margin-top: 0;
   flex-wrap: wrap;
 }
 
@@ -365,9 +491,9 @@ body.light-theme .live-file-panel {
 .chart-controls-bar {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   flex-wrap: wrap;
-  padding: 10px 16px;
+  padding: 10px 12px;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -376,14 +502,14 @@ body.light-theme .live-file-panel {
 .chart-date-range {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   flex-wrap: wrap;
 }
 
 .chart-filter-controls {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   flex-wrap: wrap;
 }
 
@@ -585,7 +711,7 @@ body.light-theme .filter-checkbox-item:hover {
 }
 
 .card {
-  padding: 6px 14px 14px;
+  padding: 6px 12px 12px;
   overflow: hidden;
 }
 
@@ -716,19 +842,19 @@ body.light-theme .filter-checkbox-item:hover {
 
 .grid-four {
   display: grid;
-  gap: 14px;
+  gap: 10px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .grid-three {
   display: grid;
-  gap: 14px;
+  gap: 10px;
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .grid-two {
   display: grid;
-  gap: 14px;
+  gap: 10px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
@@ -748,7 +874,7 @@ body.light-theme .filter-checkbox-item:hover {
 
 .summary-row {
   display: grid;
-  gap: 14px;
+  gap: 10px;
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
@@ -1705,7 +1831,7 @@ body.light-theme .legacy-convert-select {
 
 @media (max-width: 980px) {
   .hero {
-    flex-direction: column;
+    grid-template-columns: 1fr;
   }
 
   .chart-card-header {
