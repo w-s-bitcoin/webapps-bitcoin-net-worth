@@ -18,12 +18,49 @@ const FILTER_KEY_LIVE = "bitcoinNetWorthTrackerFiltersLiveV1";
 const AL_CHART_MODE_KEY = "bitcoinNetWorthTrackerAlChartModeV1";
 const AL_CHART_AXES_MODE_KEY = "bitcoinNetWorthTrackerAlChartAxesModeV1";
 const NET_CHART_AXES_MODE_KEY = "bitcoinNetWorthTrackerNetChartAxesModeV1";
+const UOA_SELECTION_KEY = "bitcoinNetWorthTrackerUoaSelectionsV1";
 const QUOTE_AUTO_REFRESH_MS = 60_000;
 const QUOTE_AUTO_REFRESH_OFFSET_MS = 1_000;
 const SERVER_HEARTBEAT_API = "/api/heartbeat";
 const SERVER_HEARTBEAT_MS = 20_000;
 
 let serverAvailable = false; // set to true after first successful server probe
+
+const FX_RATE_URLS = [
+  "../uoa/webapp_data/daily_fx_rates.csv",
+  "/webapps/uoa/webapp_data/daily_fx_rates.csv",
+  "webapps/uoa/webapp_data/daily_fx_rates.csv",
+  "https://wickedsmartbitcoin.com/webapps/uoa/webapp_data/daily_fx_rates.csv",
+  "https://raw.githubusercontent.com/w-s-bitcoin/wickedsmartbitcoin/main/webapps/uoa/webapp_data/daily_fx_rates.csv"
+];
+
+const UOA_UNITS = [
+  { code: "BTC", name: "bitcoin", decimals: 8, color: "#ff9900" },
+  { code: "USD", name: "United States dollar", decimals: 2, symbol: "$" },
+  { code: "EUR", name: "euro", decimals: 2, symbol: "€" },
+  { code: "JPY", name: "Japanese yen", decimals: 0, symbol: "¥" },
+  { code: "GBP", name: "British pound sterling", decimals: 2, symbol: "£" },
+  { code: "CNY", name: "Chinese Renminbi yuan", decimals: 2, symbol: "¥" },
+  { code: "AUD", name: "Australian dollar", decimals: 2, symbol: "A$" },
+  { code: "CAD", name: "Canadian dollar", decimals: 2, symbol: "C$" },
+  { code: "CHF", name: "Swiss franc", decimals: 2, symbol: "CHF" },
+  { code: "HKD", name: "Hong Kong dollar", decimals: 2, symbol: "HK$" },
+  { code: "SGD", name: "Singapore dollar", decimals: 2, symbol: "S$" },
+  { code: "SEK", name: "Swedish krona", decimals: 2, symbol: "kr" },
+  { code: "KRW", name: "South Korean won", decimals: 0, symbol: "₩" },
+  { code: "NOK", name: "Norwegian krone", decimals: 2, symbol: "kr" },
+  { code: "NZD", name: "New Zealand dollar", decimals: 2, symbol: "NZ$" },
+  { code: "MXN", name: "Mexican peso", decimals: 2, symbol: "MX$" },
+  { code: "INR", name: "Indian rupee", decimals: 2, symbol: "₹" },
+  { code: "RUB", name: "Russian ruble", decimals: 2, symbol: "₽" },
+  { code: "ZAR", name: "South African rand", decimals: 2, symbol: "R" },
+  { code: "TRY", name: "Turkish lira", decimals: 2, symbol: "₺" },
+  { code: "BRL", name: "Brazilian real", decimals: 2, symbol: "R$" },
+  { code: "XAU", name: "gold", decimals: 4, suffix: "oz gold", color: "#ffd21a" },
+  { code: "XAG", name: "silver", decimals: 4, suffix: "oz silver", color: "#c8d2dc" }
+];
+const UOA_UNIT_MAP = new Map(UOA_UNITS.map((unit) => [unit.code, unit]));
+const ROW_UNIT_CODES = ["USD", "BTC", "sats", ...UOA_UNITS.map((u) => u.code).filter((code) => code !== "USD" && code !== "BTC")];
 
 // Returns a fresh default formState for the given mode, seeded with the last
 // known BTC price so the exchange rate is never lost across resets.
@@ -107,6 +144,11 @@ let pendingRowFocus = null;
 let pendingRowFieldFocus = null;
 let manualEditedThisSession = false;
 let historicalPrices = {}; // MMDDYY -> USD price, loaded from remote CSV on init
+let fxRatesByDate = new Map();
+let fxRateDates = [];
+let fxRatesLoaded = false;
+let fxRatesLoadingPromise = null;
+let uoaSelections = loadUoaSelections();
 let editingSnapshotDate = mmddyy(new Date());
 let hasUnsavedAssetLiabilityChanges = false;
 let hoveredSnapshotDate = null;
@@ -152,6 +194,69 @@ function loadFilters(mode) {
     excludedAssets = new Set();
     excludedLiabilities = new Set();
   }
+}
+
+function normalizeUoaCode(code, fallback = "USD") {
+  const upper = String(code || fallback || "USD").trim().toUpperCase();
+  return UOA_UNIT_MAP.has(upper) ? upper : fallback;
+}
+
+function loadUoaSelections() {
+  try {
+    const raw = localStorage.getItem(UOA_SELECTION_KEY);
+    if (!raw) return { primary: "BTC", secondary: "USD" };
+    const parsed = JSON.parse(raw);
+    const primary = normalizeUoaCode(parsed?.primary, "BTC");
+    let secondary = normalizeUoaCode(parsed?.secondary, "USD");
+    if (secondary === primary) secondary = firstSecondaryUoa(primary);
+    return { primary, secondary };
+  } catch {
+    return { primary: "BTC", secondary: "USD" };
+  }
+}
+
+function firstSecondaryUoa(primary) {
+  return (UOA_UNITS.find((unit) => unit.code !== primary)?.code) || "USD";
+}
+
+function saveUoaSelections() {
+  try {
+    localStorage.setItem(UOA_SELECTION_KEY, JSON.stringify(uoaSelections));
+  } catch {}
+}
+
+function uoaUnitMeta(unit) {
+  return UOA_UNIT_MAP.get(normalizeUoaCode(unit, "USD")) || UOA_UNIT_MAP.get("USD");
+}
+
+function unitNeedsFx(unit) {
+  const normalized = normalizeUnit(unit);
+  return normalized !== "BTC" && normalized !== "USD" && normalized !== "sats";
+}
+
+function currentUoaNeedsFx() {
+  return unitNeedsFx(uoaSelections.primary) || unitNeedsFx(uoaSelections.secondary);
+}
+
+function currentRowsNeedFx() {
+  const rows = [...(formState.assets || []), ...(formState.liabilities || [])];
+  return rows.some((row) => unitNeedsFx(row?.unit));
+}
+
+function currentSnapshotsNeedFx() {
+  return (snapshots || []).some((snap) =>
+    [...(snap.assets || []), ...(snap.liabilities || [])].some((row) => unitNeedsFx(row?.unit))
+  );
+}
+
+function scheduleFxLoadIfNeeded() {
+  if (fxRatesLoaded || fxRatesLoadingPromise) return;
+  if (!currentUoaNeedsFx() && !currentRowsNeedFx() && !currentSnapshotsNeedFx()) return;
+  ensureFxRatesLoaded().then(() => {
+    renderAll();
+  }).catch((err) => {
+    console.warn("Could not load UoA FX rates:", err);
+  });
 }
 const chartInteractionState = {
   alChart: { labels: [], markerDates: [] },
@@ -256,6 +361,16 @@ const el = {
   liveFilePanel: document.getElementById("liveFilePanel"),
   liveFileCreateBtn: document.getElementById("liveFileCreateBtn"),
   liveFileList: document.getElementById("liveFileList"),
+  primaryUoaSelect: document.getElementById("primaryUoaSelect"),
+  secondaryUoaSelect: document.getElementById("secondaryUoaSelect"),
+  primaryUoaDropdown: document.getElementById("primaryUoaDropdown"),
+  secondaryUoaDropdown: document.getElementById("secondaryUoaDropdown"),
+  primaryUoaDropdownMenu: document.getElementById("primaryUoaDropdownMenu"),
+  secondaryUoaDropdownMenu: document.getElementById("secondaryUoaDropdownMenu"),
+  primaryUoaValue: document.getElementById("primaryUoaValue"),
+  secondaryUoaValue: document.getElementById("secondaryUoaValue"),
+  primaryUoaDropdownTrigger: document.getElementById("primaryUoaDropdownTrigger"),
+  secondaryUoaDropdownTrigger: document.getElementById("secondaryUoaDropdownTrigger"),
 };
 
 function syncEditorRowsFocusedFromDom() {
@@ -323,6 +438,7 @@ updateModeToggleUI();
 
 applyTheme();
 initEditorFocusTracking();
+initUoaControls();
 
 document.getElementById("refreshQuoteBtn").addEventListener("click", () => {
   void runTrackedAction("quote-refresh", () => refreshQuote());
@@ -1056,6 +1172,197 @@ function setTheme(nextTheme) {
   renderAll();
 }
 
+function updateAlChartModeLabels() {
+  if (el.alModeValueBtn) {
+    el.alModeValueBtn.textContent = `${uoaSelections.primary} Value`;
+  }
+  if (el.alModeRatioBtn) {
+    el.alModeRatioBtn.textContent = "LTA Ratio";
+  }
+}
+
+function uoaOptionLabel(unit) {
+  return `${unit.code} - ${unit.name}`;
+}
+
+function renderUoaDropdowns() {
+  [el.primaryUoaSelect, el.secondaryUoaSelect].forEach((select, index) => {
+    if (!select) return;
+    const isSecondary = index === 1;
+    const selected = isSecondary ? uoaSelections.secondary : uoaSelections.primary;
+    const omit = isSecondary ? uoaSelections.primary : null;
+    const options = UOA_UNITS.filter((unit) => unit.code !== omit);
+    select.innerHTML = "";
+    options.forEach((unit) => {
+      const option = document.createElement("option");
+      option.value = unit.code;
+      option.textContent = unit.code;
+      select.appendChild(option);
+    });
+    select.value = selected;
+  });
+
+  updateUoaDropdownInput(el.primaryUoaValue, uoaSelections.primary);
+  updateUoaDropdownInput(el.secondaryUoaValue, uoaSelections.secondary);
+  updateAlChartModeLabels();
+}
+
+function updateUoaDropdownInput(input, code) {
+  if (!input || document.activeElement === input) return;
+  input.value = code;
+  input.style.width = "";
+}
+
+function configureUoaDropdown(kind) {
+  const isPrimary = kind === "primary";
+  const dropdown = isPrimary ? el.primaryUoaDropdown : el.secondaryUoaDropdown;
+  const input = isPrimary ? el.primaryUoaValue : el.secondaryUoaValue;
+  const menu = isPrimary ? el.primaryUoaDropdownMenu : el.secondaryUoaDropdownMenu;
+  const trigger = isPrimary ? el.primaryUoaDropdownTrigger : el.secondaryUoaDropdownTrigger;
+  const select = isPrimary ? el.primaryUoaSelect : el.secondaryUoaSelect;
+  if (!dropdown || !input || !menu || !trigger || !select) return;
+
+  let highlightedIndex = -1;
+  const availableOptions = () => UOA_UNITS.filter((unit) => !isPrimary ? unit.code !== uoaSelections.primary : true);
+  const selectedCode = () => isPrimary ? uoaSelections.primary : uoaSelections.secondary;
+
+  const close = () => {
+    dropdown.classList.remove("open");
+    dropdown.setAttribute("aria-expanded", "false");
+    menu.innerHTML = "";
+    highlightedIndex = -1;
+    input.value = selectedCode();
+    input.style.width = "";
+  };
+
+  const optionMatches = (unit, query) => {
+    const q = query.trim().toLowerCase();
+    if (!q) return true;
+    return unit.code.toLowerCase().includes(q) || unit.name.toLowerCase().includes(q);
+  };
+
+  const renderOptions = (query = "") => {
+    const options = availableOptions().filter((unit) => optionMatches(unit, query));
+    menu.innerHTML = "";
+    highlightedIndex = options.findIndex((unit) => unit.code === selectedCode());
+    if (highlightedIndex < 0 && options.length) highlightedIndex = 0;
+    options.forEach((unit, idx) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "dca-option-btn";
+      button.dataset.value = unit.code;
+      button.setAttribute("role", "option");
+      button.setAttribute("aria-selected", unit.code === selectedCode() ? "true" : "false");
+      button.classList.toggle("dca-option-btn--selected", unit.code === selectedCode());
+      button.classList.toggle("dca-option-btn--highlighted", idx === highlightedIndex);
+      button.textContent = uoaOptionLabel(unit);
+      button.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        selectCode(unit.code);
+      });
+      menu.appendChild(button);
+    });
+  };
+
+  const open = (query = "") => {
+    dropdown.classList.add("open");
+    dropdown.setAttribute("aria-expanded", "true");
+    renderOptions(query);
+  };
+
+  const selectCode = (code) => {
+    const normalized = normalizeUoaCode(code, selectedCode());
+    if (isPrimary) {
+      const previousPrimary = uoaSelections.primary;
+      uoaSelections.primary = normalized;
+      if (uoaSelections.secondary === normalized) {
+        uoaSelections.secondary = previousPrimary !== normalized ? previousPrimary : firstSecondaryUoa(normalized);
+      }
+    } else {
+      if (normalized === uoaSelections.primary) return;
+      uoaSelections.secondary = normalized;
+    }
+    saveUoaSelections();
+    saveForm();
+    close();
+    renderAll();
+  };
+
+  const moveHighlight = (delta) => {
+    const buttons = Array.from(menu.querySelectorAll(".dca-option-btn"));
+    if (!buttons.length) return;
+    highlightedIndex = (highlightedIndex + delta + buttons.length) % buttons.length;
+    buttons.forEach((button, idx) => {
+      button.classList.toggle("dca-option-btn--highlighted", idx === highlightedIndex);
+      if (idx === highlightedIndex) button.scrollIntoView({ block: "nearest" });
+    });
+  };
+
+  trigger.addEventListener("click", (event) => {
+    event.preventDefault();
+    dropdown.classList.contains("open") ? close() : open("");
+    input.focus({ preventScroll: true });
+    input.select();
+  });
+
+  input.addEventListener("focus", () => {
+    open("");
+    input.select();
+  });
+
+  input.addEventListener("input", () => {
+    const prior = input.value;
+    renderOptions(prior);
+    if (prior && !menu.querySelector(".dca-option-btn")) {
+      input.value = prior.slice(0, -1);
+      renderOptions(input.value);
+    }
+    input.style.width = `${Math.max(42, (input.value.length + 2) * 9)}px`;
+  });
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      if (!dropdown.classList.contains("open")) open(input.value);
+      moveHighlight(1);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      if (!dropdown.classList.contains("open")) open(input.value);
+      moveHighlight(-1);
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      const exact = availableOptions().find((unit) => unit.code === input.value.trim().toUpperCase());
+      const highlighted = menu.querySelectorAll(".dca-option-btn")[highlightedIndex];
+      if (exact) selectCode(exact.code);
+      else if (highlighted) selectCode(highlighted.dataset.value);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close();
+      input.blur();
+    }
+  });
+
+  input.addEventListener("blur", () => {
+    setTimeout(() => {
+      if (!dropdown.contains(document.activeElement)) close();
+    }, 0);
+  });
+
+  select.addEventListener("change", () => selectCode(select.value));
+}
+
+function initUoaControls() {
+  configureUoaDropdown("primary");
+  configureUoaDropdown("secondary");
+  renderUoaDropdowns();
+}
+
 function trackedStateSnapshot() {
   return {
     formState: structuredClone(formState),
@@ -1063,6 +1370,7 @@ function trackedStateSnapshot() {
     chartRange: structuredClone(chartRange),
     excludedAssets: Array.from(excludedAssets).sort(),
     excludedLiabilities: Array.from(excludedLiabilities).sort(),
+    uoaSelections: structuredClone(uoaSelections),
     alChartMode,
     editingSnapshotDate,
     hasUnsavedAssetLiabilityChanges
@@ -1088,6 +1396,16 @@ function restoreTrackedState(state) {
   chartRange = structuredClone(state.chartRange || { startDate: null, endDate: null });
   excludedAssets = new Set(state.excludedAssets || []);
   excludedLiabilities = new Set(state.excludedLiabilities || []);
+  if (state.uoaSelections) {
+    uoaSelections = loadUoaSelections();
+    uoaSelections.primary = normalizeUoaCode(state.uoaSelections.primary, "BTC");
+    uoaSelections.secondary = normalizeUoaCode(state.uoaSelections.secondary, "USD");
+    if (uoaSelections.secondary === uoaSelections.primary) {
+      uoaSelections.secondary = firstSecondaryUoa(uoaSelections.primary);
+    }
+    saveUoaSelections();
+    renderUoaDropdowns();
+  }
   if (state.alChartMode === "ratio" || state.alChartMode === "value") {
     alChartMode = state.alChartMode;
   }
@@ -1099,6 +1417,7 @@ function restoreTrackedState(state) {
     el.alModeValueBtn.setAttribute("aria-pressed", isValue ? "true" : "false");
     el.alModeRatioBtn.setAttribute("aria-pressed", isValue ? "false" : "true");
   }
+  updateAlChartModeLabels();
   if (el.alChartSeparateAxes) {
     el.alChartSeparateAxes.checked = Boolean(alChartSeparateAxes);
     const axisDisabled = alChartMode !== "value";
@@ -1284,7 +1603,7 @@ function todayHistoryRowSnapshot() {
   const price = activeBtcusd() || (base && Number(base.btcusd) > 0 ? Number(base.btcusd) : 0);
   const assets = base ? (base.assets || []).map((a) => ({ ...a })) : [];
   const liabilities = base ? (base.liabilities || []).map((l) => ({ ...l })) : [];
-  const totals = computeTotals(assets, liabilities, price);
+  const totals = computeTotals(assets, liabilities, price, today);
 
   return {
     date: today,
@@ -2233,7 +2552,7 @@ function parseLiveHistoryCsv(text, { legacyUnitSelections = null } = {}) {
         assets,
         liabilities,
         comments: row.comment || row.comments || "",
-        totals: computeTotals(assets, liabilities, btcusd)
+        totals: computeTotals(assets, liabilities, btcusd, mmddyyDate)
       };
     }).filter(Boolean);
 
@@ -3171,41 +3490,80 @@ function rowsToObject(rows) {
   return out;
 }
 
-function splitAssetRows(rows) {
+function mmddyyToIsoOrToday(dateKey) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(dateKey || ""))) return String(dateKey);
+  return mmddyyToInputValue(dateKey || editingSnapshotDate || mmddyy(new Date())) || new Date().toISOString().slice(0, 10);
+}
+
+function fxDateOnOrBefore(isoDate) {
+  if (!fxRateDates.length) return null;
+  let lo = 0;
+  let hi = fxRateDates.length - 1;
+  let best = null;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (fxRateDates[mid] <= isoDate) {
+      best = fxRateDates[mid];
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best;
+}
+
+function usdPerUnit(unitRaw, btcusdRaw, dateKey) {
+  const unit = normalizeUnit(unitRaw);
+  const btcusd = Math.max(Number(btcusdRaw || 0), 1e-12);
+  if (unit === "BTC") return btcusd;
+  if (unit === "sats") return btcusd / 1e8;
+  if (unit === "USD") return 1;
+  const iso = mmddyyToIsoOrToday(dateKey);
+  const row = fxRatesByDate.get(iso) || fxRatesByDate.get(fxDateOnOrBefore(iso));
+  const value = Number(row?.[unit]);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function rowValueInUsd(row, btcusdRaw, dateKey) {
+  const amount = parseRowAmount(typeof row?.amount !== "undefined" ? row.amount : row?.value);
+  if (!Number.isFinite(amount)) return 0;
+  const rate = usdPerUnit(row?.unit, btcusdRaw, dateKey);
+  if (rate === null) return 0;
+  return amount * rate;
+}
+
+function usdToUnitValue(usdValue, unitRaw, btcusdRaw, dateKey) {
+  const parsedUsd = Number(usdValue || 0);
+  const rate = usdPerUnit(unitRaw, btcusdRaw, dateKey);
+  if (rate === null || rate <= 0) return null;
+  return parsedUsd / rate;
+}
+
+function splitAssetRows(rows, btcusdOverride = null, dateKeyOverride = null) {
   const assetsBtc = {};
   const assetsUsd = {};
+  const dateKey = dateKeyOverride || editingSnapshotDate || mmddyy(new Date());
+  const btcusd = btcusdOverride === null ? activeBtcusd() : Number(btcusdOverride || 0);
 
   uniqueValidRows(rows).forEach((r) => {
     const name = r.name;
-    const amount = r.amount;
-    const unit = r.unit;
-    if (unit === "BTC") {
-      assetsBtc[name] = (assetsBtc[name] || 0) + amount;
-    } else if (unit === "sats") {
-      assetsBtc[name] = (assetsBtc[name] || 0) + (amount / 1e8);
-    } else {
-      assetsUsd[name] = (assetsUsd[name] || 0) + amount;
-    }
+    const usdValue = rowValueInUsd(r, btcusd, dateKey);
+    assetsUsd[name] = (assetsUsd[name] || 0) + usdValue;
   });
 
   return { assetsBtc, assetsUsd };
 }
 
-function splitLiabilityRows(rows) {
+function splitLiabilityRows(rows, btcusdOverride = null, dateKeyOverride = null) {
   const liabilitiesBtc = {};
   const liabilitiesUsd = {};
+  const dateKey = dateKeyOverride || editingSnapshotDate || mmddyy(new Date());
+  const btcusd = btcusdOverride === null ? activeBtcusd() : Number(btcusdOverride || 0);
 
   uniqueValidRows(rows).forEach((r) => {
     const name = r.name;
-    const amount = r.amount;
-    const unit = r.unit;
-    if (unit === "BTC") {
-      liabilitiesBtc[name] = (liabilitiesBtc[name] || 0) + amount;
-    } else if (unit === "sats") {
-      liabilitiesBtc[name] = (liabilitiesBtc[name] || 0) + (amount / 1e8);
-    } else {
-      liabilitiesUsd[name] = (liabilitiesUsd[name] || 0) + amount;
-    }
+    const usdValue = rowValueInUsd(r, btcusd, dateKey);
+    liabilitiesUsd[name] = (liabilitiesUsd[name] || 0) + usdValue;
   });
 
   return { liabilitiesBtc, liabilitiesUsd };
@@ -3216,8 +3574,9 @@ function normalizedSnapshot(btcusdOverride = null) {
   const btcusd = Math.max(sourcePrice, 1e-12);
   const uniqueAssets = uniqueValidRows(formState.assets || []);
   const uniqueLiabilities = uniqueValidRows(formState.liabilities || []);
-  const splitAssets = splitAssetRows(formState.assets || []);
-  const splitLiabilities = splitLiabilityRows(formState.liabilities || []);
+  const dateKey = editingSnapshotDate || mmddyy(new Date());
+  const splitAssets = splitAssetRows(formState.assets || [], btcusd, dateKey);
+  const splitLiabilities = splitLiabilityRows(formState.liabilities || [], btcusd, dateKey);
   const assetsBtc = splitAssets.assetsBtc;
   const assetsUsd = splitAssets.assetsUsd;
   const liabilitiesBtc = splitLiabilities.liabilitiesBtc;
@@ -3305,7 +3664,7 @@ function propagateUnitChangeAcrossSnapshots(rowKey, rowNameRaw, oldUnitRaw, newU
     for (const row of (snap[rowKey] || [])) {
       if (String(row.name || "").trim() !== rowName) continue;
       const sourceAmount = typeof row.value !== "undefined" ? row.value : row.amount;
-      const converted = convertAmountBetweenUnits(sourceAmount, oldUnit, newUnit, datePrice);
+      const converted = convertAmountBetweenUnits(sourceAmount, oldUnit, newUnit, datePrice, snap.date);
       if (typeof row.value !== "undefined") row.value = converted;
       else row.amount = converted;
       row.unit = newUnit;
@@ -3459,7 +3818,7 @@ function addSnapshotForDate(mmddyyDate) {
     assets,
     liabilities,
     comments: "",
-    totals: computeTotals(assets, liabilities, btcusd)
+    totals: computeTotals(assets, liabilities, btcusd, mmddyyDate)
   };
 
   runTrackedAction("snapshot-add-date", () => {
@@ -3557,16 +3916,17 @@ function formatBtc(v) {
 }
 
 function normalizeUnit(unit) {
-  const upper = String(unit || "USD").toUpperCase();
+  const upper = String(unit || "USD").trim().toUpperCase();
   if (upper === "BTC") return "BTC";
   if (upper === "SATS") return "sats";
+  if (UOA_UNIT_MAP.has(upper)) return upper;
   return "USD";
 }
 
 function decimalsForUnit(unit) {
-  if (unit === "BTC") return 8;
-  if (unit === "sats") return 0;
-  return 2;
+  const normalized = normalizeUnit(unit);
+  if (normalized === "sats") return 0;
+  return uoaUnitMeta(normalized).decimals;
 }
 
 function stepForUnit(unit) {
@@ -3581,30 +3941,50 @@ function formatAmountInputValue(amount, unit) {
   return parsed.toFixed(decimalsForUnit(unit));
 }
 
-function convertAmountBetweenUnits(amount, fromUnitRaw, toUnitRaw, btcusdRaw) {
+function formatUoaAmount(value, unitRaw, { minimumFractionDigits = null } = {}) {
+  const unit = normalizeUnit(unitRaw);
+  const meta = unit === "sats" ? { code: "sats", decimals: 0, suffix: "sats" } : uoaUnitMeta(unit);
+  const parsed = Number(value || 0);
+  const maxDigits = meta.decimals;
+  const minDigits = minimumFractionDigits === null ? Math.min(maxDigits, unit === "BTC" ? 8 : 2) : minimumFractionDigits;
+  const formatted = parsed.toLocaleString(undefined, {
+    minimumFractionDigits: Math.min(minDigits, maxDigits),
+    maximumFractionDigits: maxDigits
+  });
+  if (unit === "BTC") return `${formatted} BTC`;
+  if (unit === "sats") return `${Math.round(parsed).toLocaleString()} sats`;
+  if (meta.suffix) return `${formatted} ${meta.suffix}`;
+  if (meta.symbol) return `${meta.symbol}${formatted}`;
+  return `${formatted} ${unit}`;
+}
+
+function formatUsdAsUnit(usdValue, unitRaw, btcusdRaw, dateKey) {
+  const converted = usdToUnitValue(usdValue, unitRaw, btcusdRaw, dateKey);
+  if (converted === null) return "—";
+  return formatUoaAmount(converted, unitRaw);
+}
+
+function formatPrimaryValue(usdValue, btcusdRaw, dateKey) {
+  return formatUsdAsUnit(usdValue, uoaSelections.primary, btcusdRaw, dateKey);
+}
+
+function formatSecondaryValue(usdValue, btcusdRaw, dateKey) {
+  return formatUsdAsUnit(usdValue, uoaSelections.secondary, btcusdRaw, dateKey);
+}
+
+function convertAmountBetweenUnits(amount, fromUnitRaw, toUnitRaw, btcusdRaw, dateKey = editingSnapshotDate) {
   const fromUnit = normalizeUnit(fromUnitRaw);
   const toUnit = normalizeUnit(toUnitRaw);
   const parsedAmount = parseRowAmount(amount);
   if (!Number.isFinite(parsedAmount)) return amount;
   if (fromUnit === toUnit) return parsedAmount;
 
-  const datePrice = Number(btcusdRaw);
-  let nextAmount = parsedAmount;
-  if (fromUnit === "BTC" && toUnit === "sats") {
-    nextAmount = Math.round(parsedAmount * 1e8);
-  } else if (fromUnit === "sats" && toUnit === "BTC") {
-    nextAmount = Number((parsedAmount / 1e8).toFixed(8));
-  } else if (fromUnit === "BTC" && toUnit === "USD" && datePrice > 0) {
-    nextAmount = Number((parsedAmount * datePrice).toFixed(2));
-  } else if (fromUnit === "USD" && toUnit === "BTC" && datePrice > 0) {
-    nextAmount = Number((parsedAmount / datePrice).toFixed(8));
-  } else if (fromUnit === "sats" && toUnit === "USD" && datePrice > 0) {
-    nextAmount = Number(((parsedAmount / 1e8) * datePrice).toFixed(2));
-  } else if (fromUnit === "USD" && toUnit === "sats" && datePrice > 0) {
-    nextAmount = Math.round((parsedAmount / datePrice) * 1e8);
-  }
-
-  return nextAmount;
+  const datePrice = Math.max(Number(btcusdRaw), 1e-12);
+  const usdValue = parsedAmount * (usdPerUnit(fromUnit, datePrice, dateKey) || 0);
+  const nextValue = usdToUnitValue(usdValue, toUnit, datePrice, dateKey);
+  if (nextValue === null) return parsedAmount;
+  if (toUnit === "sats") return Math.round(nextValue);
+  return Number(nextValue.toFixed(decimalsForUnit(toUnit)));
 }
 
 function renderEditor(container, key) {
@@ -3776,16 +4156,12 @@ function renderEditor(container, key) {
     let unit = null;
     if (key === "assets" || key === "liabilities") {
       unit = document.createElement("select");
-      const optUsd = document.createElement("option");
-      optUsd.value = "USD";
-      optUsd.textContent = "USD";
-      const optBtc = document.createElement("option");
-      optBtc.value = "BTC";
-      optBtc.textContent = "BTC";
-      const optSats = document.createElement("option");
-      optSats.value = "sats";
-      optSats.textContent = "sats";
-      unit.append(optUsd, optBtc, optSats);
+      ROW_UNIT_CODES.forEach((code) => {
+        const option = document.createElement("option");
+        option.value = code;
+        option.textContent = code;
+        unit.appendChild(option);
+      });
       unit.value = unitValue;
       unit.dataset.rowKey = key;
       unit.dataset.rowIndex = String(idx);
@@ -3811,7 +4187,7 @@ function renderEditor(container, key) {
       unit.addEventListener("change", () => {
         pendingRowFieldFocus = { key, idx, field: "amount" };
         const before = trackedStateSnapshot();
-        runTrackedActionFromBefore(`${key}-unit-edit`, before, () => {
+        const applyUnitChange = () => runTrackedActionFromBefore(`${key}-unit-edit`, before, () => {
           const rowName = String(formState[key][idx].name || "").trim();
           const prevUnit = normalizeUnit(formState[key][idx].unit);
           const nextUnit = normalizeUnit(unit.value);
@@ -3821,7 +4197,7 @@ function renderEditor(container, key) {
           const isFresh = Boolean(formState[key][idx]._fresh);
           if (!isFresh && Number.isFinite(parsedAmount)) {
             const datePrice = Number(historicalPrices[editingSnapshotDate]) || activeBtcusd();
-            nextAmount = convertAmountBetweenUnits(parsedAmount, prevUnit, nextUnit, datePrice);
+            nextAmount = convertAmountBetweenUnits(parsedAmount, prevUnit, nextUnit, datePrice, editingSnapshotDate);
           }
           formState[key][idx].amount = nextAmount;
           formState[key][idx].unit = nextUnit;
@@ -3836,6 +4212,13 @@ function renderEditor(container, key) {
           unit.blur();
           persistSnapshotForActiveSelection({ render: true, onlyIfDirty: true, trackAction: false });
         });
+        const prevUnit = normalizeUnit(formState[key][idx].unit);
+        const nextUnit = normalizeUnit(unit.value);
+        if ((unitNeedsFx(prevUnit) || unitNeedsFx(nextUnit)) && !fxRatesLoaded) {
+          ensureFxRatesLoaded().then(applyUnitChange).catch(() => applyUnitChange());
+        } else {
+          applyUnitChange();
+        }
       });
 
       name.addEventListener("keydown", (e) => {
@@ -4107,17 +4490,22 @@ function updateKPIs() {
         : null);
   const displayPrice = historicalPrice !== null ? historicalPrice : activeBtcusd();
   const snap = applyExclusionFilters(normalizedSnapshot(displayPrice), excludedAssets, excludedLiabilities, displayPrice);
-  el.assetsMetric.textContent = formatBtc(snap.totals.assets_btc);
-  el.assetsMetricUsd.textContent = formatUsd(snap.totals.assets_usd);
-  el.liabilitiesMetric.textContent = formatBtc(snap.totals.liabilities_btc);
-  el.liabilitiesMetricUsd.textContent = formatUsd(snap.totals.liabilities_usd);
-  el.netMetric.textContent = formatBtc(snap.totals.net_btc);
-  el.netMetricUsd.textContent = formatUsd(snap.totals.net_usd);
+  renderMetricValues(snap, displayPrice, editingSnapshotDate || today);
   
   // Update pie charts
   renderNetWorthPieChart(snap);
   renderAssetsPieChart(snap);
   renderLiabilitiesPieChart(snap);
+}
+
+function renderMetricValues(snap, displayPrice, dateKey) {
+  scheduleFxLoadIfNeeded();
+  el.assetsMetric.textContent = formatPrimaryValue(snap.totals.assets_usd, displayPrice, dateKey);
+  el.assetsMetricUsd.textContent = formatSecondaryValue(snap.totals.assets_usd, displayPrice, dateKey);
+  el.liabilitiesMetric.textContent = formatPrimaryValue(snap.totals.liabilities_usd, displayPrice, dateKey);
+  el.liabilitiesMetricUsd.textContent = formatSecondaryValue(snap.totals.liabilities_usd, displayPrice, dateKey);
+  el.netMetric.textContent = formatPrimaryValue(snap.totals.net_usd, displayPrice, dateKey);
+  el.netMetricUsd.textContent = formatSecondaryValue(snap.totals.net_usd, displayPrice, dateKey);
 }
 
 function renderNetWorthPieChart(snap) {
@@ -4469,6 +4857,8 @@ function renderAll() {
   if (isAssetLiabilityEditorFocused()) {
     return;
   }
+  scheduleFxLoadIfNeeded();
+  renderUoaDropdowns();
   
   const editorFocus = captureEditorFocusState();
   const displayDate = formatDisplayDate(editingSnapshotDate);
@@ -4504,12 +4894,7 @@ function renderAll() {
     ? "Manual price override"
     : (formState.btcusd ? `Updated · ${formatQuoteTimestamp(lastQuoteRefreshAt || new Date())}` : "No quote loaded");
 
-  el.assetsMetric.textContent = formatBtc(snap.totals.assets_btc);
-  el.assetsMetricUsd.textContent = formatUsd(snap.totals.assets_usd);
-  el.liabilitiesMetric.textContent = formatBtc(snap.totals.liabilities_btc);
-  el.liabilitiesMetricUsd.textContent = formatUsd(snap.totals.liabilities_usd);
-  el.netMetric.textContent = formatBtc(snap.totals.net_btc);
-  el.netMetricUsd.textContent = formatUsd(snap.totals.net_usd);
+  renderMetricValues(snap, displayPrice, editingSnapshotDate || today);
 
   renderNetWorthPieChart(snap);
   renderAssetsPieChart(snap);
@@ -4524,12 +4909,13 @@ function renderAll() {
   suppressNextEditorFocusRestore = false;
 }
 
-function computeTotals(assets, liabilities, btcusd) {
+function computeTotals(assets, liabilities, btcusd, dateKeyOverride = null) {
   const p = Math.max(Number(btcusd) || 0, 1e-12);
+  const dateKey = dateKeyOverride || editingSnapshotDate || mmddyy(new Date());
   const assetRows = (assets || []).map((a) => ({ name: a.name, amount: a.value, unit: a.unit }));
   const liabilityRows = (liabilities || []).map((l) => ({ name: l.name, amount: l.value, unit: l.unit }));
-  const splitA = splitAssetRows(assetRows);
-  const splitL = splitLiabilityRows(liabilityRows);
+  const splitA = splitAssetRows(assetRows, p, dateKey);
+  const splitL = splitLiabilityRows(liabilityRows, p, dateKey);
   const aB = splitA.assetsBtc; const aU = splitA.assetsUsd;
   const lB = splitL.liabilitiesBtc; const lU = splitL.liabilitiesUsd;
   Object.entries(aB).forEach(([n, v]) => { aU[n] = v * p; });
@@ -4546,7 +4932,7 @@ function applyExclusionFilters(snap, exclAssets, exclLiabs, priceOverride) {
   const filteredA = exclAssets?.size ? (snap.assets || []).filter(a => !exclAssets.has(a.name)) : (snap.assets || []);
   const filteredL = exclLiabs?.size ? (snap.liabilities || []).filter(l => !exclLiabs.has(l.name)) : (snap.liabilities || []);
   const price = priceOverride !== undefined ? priceOverride : Number(snap.btcusd || 0);
-  return { ...snap, assets: filteredA, liabilities: filteredL, totals: computeTotals(filteredA, filteredL, price) };
+  return { ...snap, assets: filteredA, liabilities: filteredL, totals: computeTotals(filteredA, filteredL, price, snap.date) };
 }
 
 function snapshotsForCharts(displayPrice, exclAssets, exclLiabs) {
@@ -4619,7 +5005,7 @@ function snapshotsForCharts(displayPrice, exclAssets, exclLiabs) {
     } else {
       const filteredA = exclAssets?.size ? (snap.assets || []).filter(a => !exclAssets.has(a.name)) : (snap.assets || []);
       const filteredL = exclLiabs?.size ? (snap.liabilities || []).filter(l => !exclLiabs.has(l.name)) : (snap.liabilities || []);
-      totals = computeTotals(filteredA, filteredL, price);
+      totals = computeTotals(filteredA, filteredL, price, dateKey);
     }
 
     result.push({ date: dateKey, btcusd: price, totals });
@@ -5499,13 +5885,7 @@ function renderAssetLiabilityChart(chartSnapshots = snapshots) {
     return;
   }
 
-  const allBtcValues = plottedSnapshots.flatMap((s) => [
-    Number(s.totals?.assets_btc || 0),
-    Number(s.totals?.liabilities_btc || 0)
-  ]);
-  const maxBtcVal = Math.max(...allBtcValues.map(Math.abs), 0);
-  // Use sats display when max value is below 0.001 BTC (100,000 sats)
-  const useSats = maxBtcVal > 0 && maxBtcVal < 0.001;
+  const unit = uoaSelections.primary;
 
   const labels = plottedSnapshots.map((s) => s.date);
   const markerDates = historyDatesIncludingToday().filter((d) => labels.includes(d));
@@ -5514,18 +5894,14 @@ function renderAssetLiabilityChart(chartSnapshots = snapshots) {
     {
       label: "Assets",
       color: "#39d7a4",
-      values: plottedSnapshots.map((s) => Number(s.totals?.assets_btc || 0)),
-      valueFormatter: useSats
-        ? (v) => `${Math.round(Number(v) * 1e8).toLocaleString()} sats`
-        : (v) => `${Number(v).toFixed(8)} BTC`
+      values: plottedSnapshots.map((s) => usdToUnitValue(s.totals?.assets_usd || 0, unit, s.btcusd, s.date) || 0),
+      valueFormatter: (v) => formatUoaAmount(v, unit)
     },
     {
       label: "Liabilities",
       color: "#ff6f86",
-      values: plottedSnapshots.map((s) => Number(s.totals?.liabilities_btc || 0)),
-      valueFormatter: useSats
-        ? (v) => `${Math.round(Number(v) * 1e8).toLocaleString()} sats`
-        : (v) => `${Number(v).toFixed(8)} BTC`
+      values: plottedSnapshots.map((s) => usdToUnitValue(s.totals?.liabilities_usd || 0, unit, s.btcusd, s.date) || 0),
+      valueFormatter: (v) => formatUoaAmount(v, unit)
     }
   ];
 
@@ -5539,9 +5915,7 @@ function renderAssetLiabilityChart(chartSnapshots = snapshots) {
     selectedHistoryDate: editingSnapshotDate,
     hoveredHistoryDate: hoveredSnapshotDate,
     hoverY: hoveredCanvasY,
-    ...(useSats
-      ? { yTickFormatter: (v) => formatSatsCompact(Math.round(v * 1e8)) }
-      : { yTickSuffix: " BTC" })
+    yTickFormatter: (v) => formatUoaAmount(v, unit, { minimumFractionDigits: 0 })
   };
 
   if (alChartSeparateAxes) {
@@ -5550,7 +5924,7 @@ function renderAssetLiabilityChart(chartSnapshots = snapshots) {
       rightAxisLabelPad: 26,
       leftAxisColor: datasets[0].color,
       rightAxisColor: datasets[1].color,
-      ...(useSats ? { yTickFormatter: (v) => formatSatsCompact(Math.round(v * 1e8)) } : {})
+      yTickFormatter: (v) => formatUoaAmount(v, unit, { minimumFractionDigits: 0 })
     });
   } else {
     drawLineChart(el.alChart, datasets, labels, chartOpts);
@@ -5574,22 +5948,30 @@ function renderNetChangeChart(chartSnapshots = snapshots) {
   const labels = plottedSnapshots.map((s) => s.date);
   const markerDates = historyDatesIncludingToday().filter((d) => labels.includes(d));
   chartInteractionState.netChart = { labels, markerDates };
-  const baseUsd = Number(plottedSnapshots[0].totals.net_usd) || 1e-12;
-  const baseBtc = Number(plottedSnapshots[0].totals.net_btc) || 1e-12;
+  const primaryUnit = uoaSelections.primary;
+  const secondaryUnit = uoaSelections.secondary;
+  const primaryRaw = plottedSnapshots.map((s) => usdToUnitValue(s.totals.net_usd, primaryUnit, s.btcusd, s.date) || 0);
+  const secondaryRaw = plottedSnapshots.map((s) => usdToUnitValue(s.totals.net_usd, secondaryUnit, s.btcusd, s.date) || 0);
+  const basePrimary = Number(primaryRaw[0]) || 1e-12;
+  const baseSecondary = Number(secondaryRaw[0]) || 1e-12;
 
-  const usdChanges = plottedSnapshots.map((s) => ((Number(s.totals.net_usd) - baseUsd) / baseUsd) * 100);
-  const btcChanges = plottedSnapshots.map((s) => ((Number(s.totals.net_btc) - baseBtc) / baseBtc) * 100);
-  const usdRaw = plottedSnapshots.map((s) => Number(s.totals.net_usd));
-  const btcRaw = plottedSnapshots.map((s) => Number(s.totals.net_btc));
+  const primaryChanges = primaryRaw.map((v) => ((Number(v) - basePrimary) / basePrimary) * 100);
+  const secondaryChanges = secondaryRaw.map((v) => ((Number(v) - baseSecondary) / baseSecondary) * 100);
 
   const datasets = [
-    { label: "BTC Net Worth", color: "#f7931a", values: btcChanges, rawValues: btcRaw, rawFormatter: formatBtc },
     {
-      label: "USD Net Worth",
+      label: `${primaryUnit} Net Worth`,
+      color: uoaUnitMeta(primaryUnit).color || "#f7931a",
+      values: primaryChanges,
+      rawValues: primaryRaw,
+      rawFormatter: (v) => formatUoaAmount(v, primaryUnit)
+    },
+    {
+      label: `${secondaryUnit} Net Worth`,
       color: themeValue("--networth-usd-line") || "#d7dde3",
-      values: usdChanges,
-      rawValues: usdRaw,
-      rawFormatter: formatUsd
+      values: secondaryChanges,
+      rawValues: secondaryRaw,
+      rawFormatter: (v) => formatUoaAmount(v, secondaryUnit)
     }
   ];
 
@@ -5669,6 +6051,66 @@ function parseCsv(text) {
     headers.forEach((h, i) => { obj[h.trim()] = values[i] ?? ''; });
     return obj;
   });
+}
+
+async function ensureFxRatesLoaded() {
+  if (fxRatesLoaded) return true;
+  if (fxRatesLoadingPromise) return fxRatesLoadingPromise;
+
+  fxRatesLoadingPromise = (async () => {
+    let text = "";
+    let loaded = false;
+    for (const url of FX_RATE_URLS) {
+      try {
+        const res = await fetch(url, { cache: "no-cache" });
+        if (!res.ok) continue;
+        text = await res.text();
+        loaded = true;
+        break;
+      } catch {
+        // Try the next path.
+      }
+    }
+    if (!loaded) throw new Error("daily_fx_rates.csv was unavailable");
+
+    const normalized = text.replace(/\r\n?/g, "\n");
+    const lines = normalized.trim().split("\n").filter((line) => line.trim());
+    if (lines.length < 2) throw new Error("daily_fx_rates.csv had no rows");
+    const headers = parseCsvRow(lines[0]).map((h) => h.trim().toLowerCase());
+    const dateIndex = headers.indexOf("date");
+    const codeIndex = new Map();
+    UOA_UNITS.forEach((unit) => {
+      if (unit.code === "BTC" || unit.code === "USD") return;
+      const idx = headers.indexOf(`${unit.code.toLowerCase()}usd`);
+      if (idx >= 0) codeIndex.set(unit.code, idx);
+    });
+
+    const byDate = new Map();
+    const dates = [];
+    for (let i = 1; i < lines.length; i++) {
+      const parts = parseCsvRow(lines[i]);
+      const iso = String(parts[dateIndex] || "").trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) continue;
+      const row = {};
+      codeIndex.forEach((idx, code) => {
+        const value = Number(parts[idx]);
+        if (Number.isFinite(value) && value > 0) row[code] = value;
+      });
+      if (Object.keys(row).length) {
+        byDate.set(iso, row);
+        dates.push(iso);
+      }
+    }
+
+    fxRatesByDate = byDate;
+    fxRateDates = dates.sort();
+    fxRatesLoaded = true;
+    return true;
+  })().finally(() => {
+    fxRatesLoadingPromise = null;
+  });
+
+  return fxRatesLoadingPromise;
 }
 
 async function fetchHistoricalPrices() {
@@ -6086,7 +6528,7 @@ async function loadDemoData() {
           assets,
           liabilities,
           comments: row.comment || row.comments || "",
-          totals: computeTotals(assets, liabilities, btcusd)
+          totals: computeTotals(assets, liabilities, btcusd, mmddyyDate)
         };
       } catch {
         return null;

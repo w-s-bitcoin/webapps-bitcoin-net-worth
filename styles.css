@@ -441,6 +441,170 @@ body.light-theme .live-file-panel {
   margin: 0;
 }
 
+.networth-uoa-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.uoa-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 4px 8px 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #000000;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 0.82rem;
+  white-space: nowrap;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+body.light-theme .uoa-filter-chip {
+  background: #ffffff;
+}
+
+.uoa-filter-chip:hover,
+.uoa-filter-chip:focus-within,
+.uoa-filter-chip:has(.dca-dropdown.open) {
+  border-color: var(--accent-border);
+}
+
+.dca-native-select {
+  display: none;
+}
+
+.dca-dropdown {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.dca-dropdown::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%237a756e' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+  transform: translateY(-50%);
+  opacity: 0.9;
+  transition: transform 140ms ease;
+}
+
+body:not(.light-theme) .dca-dropdown::after {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23d6e1e6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+}
+
+.dca-dropdown.open::after {
+  transform: translateY(-50%) rotate(180deg);
+}
+
+.networth-uoa-dropdown {
+  height: 20px;
+  min-width: 42px;
+}
+
+.dca-dropdown-input {
+  width: 42px;
+  min-width: 42px;
+  max-width: 18ch;
+  height: 20px;
+  padding: 0 16px 0 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.82rem;
+  line-height: 1;
+  outline: none;
+  transition: width 120ms ease;
+}
+
+.dca-dropdown.open .dca-dropdown-input,
+.dca-dropdown-input:hover {
+  border-color: transparent;
+}
+
+.dca-dropdown-trigger {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 12px;
+  height: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.dca-dropdown-trigger::before,
+.dca-dropdown-overlay {
+  content: none;
+  display: none;
+}
+
+.dca-dropdown-menu {
+  position: absolute;
+  z-index: 3000;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 260px;
+  max-width: min(460px, calc(100vw - 28px));
+  max-height: 300px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #000000;
+  box-shadow: 0 16px 32px rgba(0, 0, 0, 0.36);
+  display: none;
+}
+
+body.light-theme .dca-dropdown-menu {
+  background: #ffffff;
+}
+
+.dca-dropdown.open .dca-dropdown-menu {
+  display: grid;
+  gap: 2px;
+}
+
+.dca-option-btn {
+  width: 100%;
+  border: 0;
+  border-radius: 7px;
+  padding: 7px 9px;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.82rem;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.dca-option-btn:hover,
+.dca-option-btn--highlighted {
+  background: rgba(255, 153, 0, 0.12);
+}
+
+.dca-option-btn--selected {
+  color: var(--accent);
+}
+
 .mode-toggle {
   display: inline-flex;
   gap: 0;

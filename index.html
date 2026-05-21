@@ -80,6 +80,27 @@
               <input id="liveEncryptionEnabled" type="checkbox" />
               <span>Encrypt data</span>
             </label>
+            <div class="networth-uoa-controls" aria-label="Unit of account controls">
+              <label class="uoa-filter-chip">Primary UoA
+                <div id="primaryUoaDropdown" class="dca-dropdown networth-uoa-dropdown" aria-expanded="false">
+                  <input id="primaryUoaValue" class="dca-dropdown-value dca-dropdown-input" type="text" value="BTC" aria-label="Search primary UoA" autocomplete="off" spellcheck="false" />
+                  <button id="primaryUoaDropdownTrigger" class="dca-dropdown-trigger" type="button" aria-label="Primary UoA"></button>
+                  <div class="dca-dropdown-overlay"></div>
+                  <div id="primaryUoaDropdownMenu" class="dca-dropdown-menu" role="listbox" aria-label="Primary UoA options"></div>
+                </div>
+                <select id="primaryUoaSelect" class="dca-native-select" aria-label="Primary unit of account"></select>
+              </label>
+
+              <label class="uoa-filter-chip">Secondary UoA
+                <div id="secondaryUoaDropdown" class="dca-dropdown networth-uoa-dropdown" aria-expanded="false">
+                  <input id="secondaryUoaValue" class="dca-dropdown-value dca-dropdown-input" type="text" value="USD" aria-label="Search secondary UoA" autocomplete="off" spellcheck="false" />
+                  <button id="secondaryUoaDropdownTrigger" class="dca-dropdown-trigger" type="button" aria-label="Secondary UoA"></button>
+                  <div class="dca-dropdown-overlay"></div>
+                  <div id="secondaryUoaDropdownMenu" class="dca-dropdown-menu" role="listbox" aria-label="Secondary UoA options"></div>
+                </div>
+                <select id="secondaryUoaSelect" class="dca-native-select" aria-label="Secondary unit of account"></select>
+              </label>
+            </div>
           </div>
 
         </div>
