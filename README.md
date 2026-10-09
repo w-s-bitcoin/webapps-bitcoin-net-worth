@@ -19,7 +19,11 @@ Requires Python 3 on PATH. Opens the app at `http://127.0.0.1:8081/`.
 
 ## What It Does
 
-- Tracks assets and liabilities in BTC and USD.
+- Tracks assets and liabilities in configurable units of account, defaulting to USD, BTC, and sats.
+- Settings beside the title enables major currencies, cryptocurrencies, Bitcoin-related stocks, and broad-market, bond, commodity, and Bitcoin ETFs. Click a category heading to expand or collapse it; its count shows selected units.
+- Stock and ETF amounts are share counts, including fractional shares. Hiding a unit keeps existing holdings intact.
+- Public crypto spot/date quotes and delayed stock/ETF quotes support valuations. Historical stock valuations use saved or manually entered prices; unavailable prices show an em dash and omit affected chart dates.
+- Saved CSV and encrypted files retain share quantities, BTC/USD rates, and dated market prices. Older files remain readable.
 - Supports demo mode and live mode.
 - Fetches BTCUSD from Kraken, with optional manual BTCUSD override.
 - Saves and edits snapshot history.
@@ -43,6 +47,7 @@ Requires Python 3 on PATH. Opens the app at `http://127.0.0.1:8081/`.
 - `index.html`: app layout and controls
 - `styles.css`: theme and component styles
 - `app.js`: app state, calculations, persistence, chart rendering, undo/redo
+- `market_units.js`: unit catalogue and public cryptocurrency/stock/ETF quote feed
 - `standalone_server.py`: local API and static file server
 - `history_files/`: demo and live history files
 - `launch_macos.command`: macOS launcher
@@ -50,3 +55,10 @@ Requires Python 3 on PATH. Opens the app at `http://127.0.0.1:8081/`.
 - `launch_windows.bat`: Windows launcher entrypoint
 - `launch_windows.ps1`: Windows launcher implementation
 
+## Validation
+
+Run `node tests/test_market_units.mjs` for isolated public quote fixtures. Run
+`python3 tests/test_units_browser.py` for settings, quantities, valuations,
+CSV/encryption, native file API, and mobile browser checks. Set `CHROME_BIN`
+when Chrome is not at its default macOS location. Browser checks copy the app
+and demo fixture to a temporary directory and never read or edit personal history.

@@ -28,6 +28,23 @@
                   Track Bitcoin-denominated net worth across assets and liabilities, compare BTC and USD changes over time, and manage demo or local encrypted live data snapshots.
                 </div>
               </div>
+              <div class="filters-menu-wrap">
+                <button id="netWorthSettingsBtn" class="info-btn filters-btn" type="button" aria-label="Show dashboard settings" aria-haspopup="dialog" aria-expanded="false" aria-controls="netWorthSettingsPanel"><svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="M3 5.5h8.3M16.7 5.5H21M3 12h4.3M12.7 12H21M3 18.5h10.3M18.7 18.5H21"/><circle cx="14" cy="5.5" r="2.65"/><circle cx="10" cy="12" r="2.65"/><circle cx="16" cy="18.5" r="2.65"/></svg></button>
+                <dialog id="netWorthSettingsPanel" class="networth-settings-panel title-settings-dialog" aria-labelledby="netWorthSettingsTitle" aria-describedby="netWorthSettingsDescription">
+                  <div class="networth-settings-header">
+                    <h2 id="netWorthSettingsTitle">Dashboard Settings</h2>
+                    <button id="netWorthSettingsClose" class="networth-settings-close" type="button" aria-label="Close settings">×</button>
+                  </div>
+                  <p id="netWorthSettingsDescription" class="networth-settings-description">Choose the units available in your unit-of-account and asset dropdowns. Amounts in stocks and ETFs are numbers of shares.</p>
+                  <label class="networth-unit-search-label" for="netWorthUnitSearch">Find a currency or asset</label>
+                  <input id="netWorthUnitSearch" class="networth-unit-search" type="search" placeholder="Search by name or symbol" autocomplete="off" spellcheck="false" />
+                  <div id="netWorthUnitOptions" class="networth-unit-options"></div>
+                  <div class="networth-settings-footer">
+                    <div id="netWorthUnitSettingsStatus" class="networth-settings-status" role="status" aria-live="polite"></div>
+                    <button id="netWorthUnitsReset" class="networth-units-reset" type="button">Reset to USD, BTC &amp; sats</button>
+                  </div>
+                </dialog>
+              </div>
             </div>
             <div class="title-actions">
               <div class="history-action-buttons" aria-label="History actions">
@@ -115,6 +132,8 @@
           </div>
         </div>
       </header>
+
+      <div id="marketQuoteStatus" class="market-quote-status" role="status" aria-live="polite" hidden></div>
 
       <section class="summary-row">
         <article class="metric-card">
@@ -274,6 +293,7 @@
       </section>
     </main>
 
+    <script src="market_units.js"></script>
     <script src="app.js"></script>
   </body>
 </html>
