@@ -2352,13 +2352,43 @@ dialog.networth-settings-panel[open] {
 }
 
 .market-quote-status {
-  padding: 10px 12px;
+  position: relative;
+  padding: 10px 48px 10px 12px;
   border: 1px solid var(--accent-border);
   border-radius: 10px;
   background: var(--accent-bg);
   color: var(--text);
   font-size: 0.82rem;
   line-height: 1.45;
+}
+
+.market-quote-dismiss {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--accent-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.market-quote-dismiss:hover {
+  background: var(--accent-bg);
+}
+
+.market-quote-dismiss:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 @media (max-width: 540px) {
