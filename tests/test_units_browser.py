@@ -383,6 +383,109 @@ def check_mobile(browser):
     })
 
 
+def check_top_panel_layout(browser):
+    # Change only this isolated profile's presentation state; no file is loaded
+    # or saved while exercising mode-dependent controls and long filenames.
+    browser.evaluate("""
+      window.__layoutPrior = { mode: currentMode, file: liveHistoryFile,
+        locked: liveAccessLocked, theme: currentTheme };
+      document.activeElement?.blur();
+    """)
+    try:
+        for mode in ("demo", "live"):
+            browser.evaluate(f"""
+              currentMode = {json.dumps(mode)};
+              liveHistoryFile = 'A-long-synthetic-history-filename-for-responsive-layout.csv';
+              liveAccessLocked = false;
+              updateModeToggleUI();
+            """)
+            for width in (320, 390, 533, 768, 980, 981, 1024, 1280, 1920):
+                browser.cdp.command("Emulation.setDeviceMetricsOverride", {
+                    "width": width, "height": 1000, "deviceScaleFactor": 1,
+                    "mobile": width <= 768,
+                })
+                browser.cdp.command("Emulation.setPageScaleFactor", {"pageScaleFactor": 1})
+                for theme in ("dark", "light"):
+                    browser.evaluate(f"""
+                      currentTheme = {json.dumps(theme)};
+                      applyTheme();
+                      window.scrollTo(0, 0);
+                      new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+                    """)
+                    actual_width = browser.evaluate("document.documentElement.clientWidth")
+                    if actual_width != width:
+                        raise AssertionError(f"expected {width}px viewport, got {actual_width}px")
+                    if (width, mode, theme) in ((533, "demo", "dark"), (320, "live", "dark"), (1280, "live", "light")):
+                        browser.screenshot(f"networth-top-panel-{width}-{mode}-{theme}.png")
+                    browser.check(f"top panel {width}px {mode} {theme}", """
+                      const panel = document.querySelector('.title-panel').getBoundingClientRect();
+                      if (panel.left < -1 || panel.right > document.documentElement.clientWidth + 1 || panel.top < -1)
+                        return `panel outside viewport: ${JSON.stringify(panel.toJSON())}`;
+                      const nodes = [...document.querySelectorAll(`.title-panel h1, .title-panel .info-wrap,
+                        .title-panel .filters-menu-wrap, .history-action-buttons, .theme-toggle,
+                        .mode-toggle, .live-file-wrap, .encryption-toggle-wrap, .uoa-filter-chip`)]
+                        .filter(node => node.getClientRects().length)
+                        .map(node => ({ name: node.id || node.className || node.tagName,
+                          box: node.getBoundingClientRect() }));
+                      for (const { name, box } of nodes) {
+                        if (box.left < panel.left - 1 || box.right > panel.right + 1 ||
+                            box.top < panel.top - 1 || box.bottom > panel.bottom + 1)
+                          return `${name} outside panel: ${JSON.stringify(box.toJSON())}; panel=${JSON.stringify(panel.toJSON())}`;
+                      }
+                      const overlaps = (a, b) => Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1 &&
+                        Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1;
+                      for (let i = 0; i < nodes.length; i++) {
+                        for (let j = i + 1; j < nodes.length; j++) {
+                          if (overlaps(nodes[i].box, nodes[j].box))
+                            return `${nodes[i].name} overlaps ${nodes[j].name}`;
+                        }
+                      }
+                      const quote = document.querySelector('.price-card').getBoundingClientRect();
+                      if (overlaps(panel, quote)) return 'title panel overlaps the exchange-rate card';
+                    """)
+                    if width == 533 and theme == "dark":
+                        check_uoa_menu_layout(browser)
+    finally:
+        browser.evaluate("""
+          currentMode = window.__layoutPrior.mode;
+          liveHistoryFile = window.__layoutPrior.file;
+          liveAccessLocked = window.__layoutPrior.locked;
+          currentTheme = window.__layoutPrior.theme;
+          applyTheme();
+          delete window.__layoutPrior;
+          updateModeToggleUI();
+        """)
+        browser.cdp.command("Emulation.setDeviceMetricsOverride", {
+            "width": 1280, "height": 1000, "deviceScaleFactor": 1, "mobile": False,
+        })
+
+
+def check_uoa_menu_layout(browser):
+    for kind in ("primary", "secondary"):
+        browser.evaluate(f"document.querySelector('#{kind}UoaDropdownTrigger').click()")
+        for width in (533, 320, 533):
+            browser.cdp.command("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": 1000, "deviceScaleFactor": 1, "mobile": True,
+            })
+            browser.cdp.command("Emulation.setPageScaleFactor", {"pageScaleFactor": 1})
+            browser.check(f"{kind} UoA menu after resize to {width}px", f"""
+              await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+              const dropdown = document.querySelector('#{kind}UoaDropdown');
+              const box = document.querySelector('#{kind}UoaDropdownMenu').getBoundingClientRect();
+              if (dropdown.getAttribute('aria-expanded') !== 'true' || box.width < 100)
+                return 'menu did not stay open';
+              if (box.left < -1 || box.right > document.documentElement.clientWidth + 1)
+                return `menu outside viewport: ${{JSON.stringify(box.toJSON())}}`;
+            """)
+        browser.check(f"{kind} UoA menu closes with Escape", f"""
+          const input = document.querySelector('#{kind}UoaValue');
+          input.dispatchEvent(new KeyboardEvent('keydown', {{ key: 'Escape', bubbles: true }}));
+          input.blur();
+          if (document.querySelector('#{kind}UoaDropdown').getAttribute('aria-expanded') !== 'false')
+            return 'Escape left the menu open';
+        """)
+
+
 
 def check_missing_prices(browser):
     browser.check("unavailable quotes never become zero-valued holdings", r"""
@@ -554,6 +657,7 @@ def main():
             cdp.command("Page.navigate", {"url": dashboard_url})
             browser = BrowserChecks(cdp)
             browser.ready()
+            check_top_panel_layout(browser)
             check_settings(browser)
             check_categories(browser)
             check_holdings(browser)

@@ -1211,9 +1211,20 @@ function configureUoaDropdown(kind) {
   let highlightedIndex = -1;
   const availableOptions = () => availableUoaUnits().filter((unit) => !isPrimary ? unit.code !== uoaSelections.primary : true);
   const selectedCode = () => isPrimary ? uoaSelections.primary : uoaSelections.secondary;
+  const positionMenu = () => {
+    if (!dropdown.classList.contains("open")) return;
+    menu.style.setProperty("--networth-menu-shift-x", "0px");
+    const rect = menu.getBoundingClientRect();
+    const viewportWidth = document.documentElement.clientWidth;
+    let shift = 0;
+    if (rect.left < 8) shift = 8 - rect.left;
+    else if (rect.right > viewportWidth - 8) shift = viewportWidth - 8 - rect.right;
+    menu.style.setProperty("--networth-menu-shift-x", `${Math.round(shift)}px`);
+  };
 
   const close = () => {
     dropdown.classList.remove("open");
+    menu.style.removeProperty("--networth-menu-shift-x");
     dropdown.setAttribute("aria-expanded", "false");
     menu.innerHTML = "";
     highlightedIndex = -1;
@@ -1248,6 +1259,7 @@ function configureUoaDropdown(kind) {
       });
       menu.appendChild(button);
     });
+    positionMenu();
   };
 
   const open = (query = "") => {
@@ -1341,6 +1353,8 @@ function configureUoaDropdown(kind) {
   });
 
   select.addEventListener("change", () => selectCode(select.value));
+  window.addEventListener("resize", positionMenu);
+  new ResizeObserver(positionMenu).observe(dropdown);
 }
 
 function initUoaControls() {

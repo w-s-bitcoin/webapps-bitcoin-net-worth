@@ -149,7 +149,8 @@ body.light-theme .bg-orb {
   overflow: visible;
   min-width: 0;
   min-height: var(--top-kpi-panel-height);
-  height: var(--top-kpi-panel-height);
+  /* Wrapped controls must contribute to the panel's height at every width. */
+  height: auto;
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -561,7 +562,7 @@ body:not(.light-theme) .dca-dropdown::after {
   z-index: 3000;
   top: calc(100% + 4px);
   left: 0;
-  min-width: 260px;
+  min-width: min(260px, calc(100vw - 28px));
   max-width: min(460px, calc(100vw - 28px));
   max-height: 300px;
   overflow: auto;
@@ -571,6 +572,7 @@ body:not(.light-theme) .dca-dropdown::after {
   background: #000000;
   box-shadow: 0 16px 32px rgba(0, 0, 0, 0.36);
   display: none;
+  transform: translateX(var(--networth-menu-shift-x, 0px));
 }
 
 body.light-theme .dca-dropdown-menu {
