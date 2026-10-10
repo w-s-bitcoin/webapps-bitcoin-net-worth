@@ -26,7 +26,7 @@ Requires Python 3 on PATH. Opens the app at `http://127.0.0.1:8081/`.
 - Public crypto spot/date quotes and delayed stock/ETF quotes support valuations. Historical stock valuations use saved or manually entered prices; unavailable prices show an em dash and omit affected chart dates.
 - Saved CSV and encrypted files retain share quantities, BTC/USD rates, and dated market prices. Older files remain readable.
 - Supports demo mode and live mode.
-- Fetches BTCUSD from Kraken, with optional manual BTCUSD override.
+- Fetches BTCUSD from Kraken, with optional manual BTCUSD override. For today’s holdings, a manual Bitcoin price applies the same percentage change to estimated MSTR and Bitcoin fund prices (including BTCFX and Bitcoin ETFs). Other stocks and funds keep their own prices. Estimates use automatic or manually set share prices as the base; saved quotes and history retain their original prices.
 - Saves and edits snapshot history.
 - Draws two built-in charts:
    - Net worth change in BTC vs USD

@@ -82,6 +82,11 @@
     ["EZBC", "Franklin Bitcoin ETF"], ["BTCW", "WisdomTree Bitcoin Fund"],
     ["BITO", "ProShares Bitcoin ETF (futures)"],
   ].map(([code, name]) => ({ code, name, decimals: 6, suffix: `${code} shares`, kind: "stock", category: "etf" }));
+  // These instruments follow the user's Bitcoin what-if percentage adjustment.
+  const bitcoinLinkedCodes = new Set([
+    "MSTR", "BTCFX", "IBIT", "FBTC", "ARKB", "BITB", "GBTC", "HODL",
+    "BTCO", "BRRR", "EZBC", "BTCW", "BITO",
+  ]);
   const units = Object.freeze([
     fiat[0],
     { code: "BTC", name: "bitcoin", decimals: 8, kind: "bitcoin", color: "#ff9900" },
@@ -91,7 +96,7 @@
     { code: "XAG", name: "silver", decimals: 4, kind: "metal", suffix: "oz silver", color: "#c8d2dc" },
     { code: "XPT", name: "platinum", decimals: 4, kind: "metal", suffix: "oz platinum", color: "#d5d8dc" },
     { code: "XPD", name: "palladium", decimals: 4, kind: "metal", suffix: "oz palladium", color: "#b9c8d2" },
-  ].map(Object.freeze));
+  ].map((unit) => Object.freeze({ ...unit, bitcoinLinked: bitcoinLinkedCodes.has(unit.code) })));
   const marketCodes = new Set([...crypto, ...stocks, ...etfs].map((unit) => unit.code));
   const cryptoCodes = new Set(crypto.map((unit) => unit.code));
 

@@ -61,6 +61,9 @@ const feed = api.create({ onChange: () => { changes += 1; } });
 const today = '2026-10-08';
 
 assert.equal(new Set(api.units.map((unit) => unit.code)).size, api.units.length, 'units are unambiguous');
+assert.deepEqual(Array.from(api.units.filter((unit) => unit.bitcoinLinked), (unit) => unit.code).sort(),
+  ['MSTR', 'BTCFX', 'IBIT', 'FBTC', 'ARKB', 'BITB', 'GBTC', 'HODL', 'BTCO', 'BRRR', 'EZBC', 'BTCW', 'BITO'].sort(),
+  'only MSTR and Bitcoin funds participate in manual Bitcoin estimates');
 assert.equal(api.units.find((unit) => unit.code === 'sats').decimals, 0);
 assert.equal(api.units.find((unit) => unit.code === 'MSTR').kind, 'stock');
 assert.ok(api.units.find((unit) => unit.code === 'MSTR').decimals > 0, 'fractional shares are supported');

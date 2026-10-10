@@ -698,6 +698,192 @@ def check_historical_filters(browser):
     """)
 
 
+def check_manual_bitcoin_estimates(browser):
+    browser.check("manual BTC price estimates stay proportional and separate from saved prices", r"""
+      const prior = { state: trackedStateSnapshot(), prices: historicalPrices,
+        enabled: new Set(enabledUnitCodes), undo: undoStack, redo: redoStack, log: actionLog,
+        edited: manualEditedThisSession, prompt: window.prompt };
+      const closeTo = (actual, expected) => Number.isFinite(actual) && Math.abs(actual - expected) < 1e-8;
+      const settleEditor = async () => {
+        await new Promise(resolve => setTimeout(resolve, 0));
+        document.activeElement?.blur();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        syncEditorRowsFocusedFromDom();
+      };
+      const enterBitcoinPrice = async (price) => {
+        const input = document.querySelector('#manualBtcusd');
+        input.focus();
+        input.value = String(price);
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        await settleEditor();
+        renderAll();
+      };
+      networthMarketFeed.stop();
+      try {
+        await settleEditor();
+        const today = mmddyy(new Date());
+        const todayIso = mmddyyToIsoOrToday(today);
+        const past = new Date();
+        past.setDate(past.getDate() - 1);
+        const yesterday = mmddyy(past);
+        editingSnapshotDate = today;
+        excludedAssets = new Set();
+        excludedLiabilities = new Set();
+        uoaSelections = { primary: 'BTC', secondary: 'USD' };
+        enabledUnitCodes = new Set([...prior.enabled, 'MSTR', 'BTCFX', 'IBIT', 'VOO']);
+        formState = { ...freshFormState('live'), btcusd: 100000,
+          unit_prices: { [todayIso]: { COIN: 200, MARA: 15, XYZ: 70, HOOD: 25 } },
+          assets: [
+            { name: 'Strategy estimate fixture', amount: 2.5, unit: 'MSTR' },
+            { name: 'Mutual fund estimate fixture', amount: 10, unit: 'BTCFX' },
+            { name: 'Bitcoin ETF estimate fixture', amount: 4, unit: 'IBIT' },
+            { name: 'Index ETF unchanged fixture', amount: 1, unit: 'VOO' },
+            { name: 'Exchange unchanged fixture', amount: 1, unit: 'COIN' },
+            { name: 'Miner unchanged fixture', amount: 1, unit: 'MARA' },
+            { name: 'Block unchanged fixture', amount: 1, unit: 'XYZ' },
+            { name: 'Broker unchanged fixture', amount: 1, unit: 'HOOD' },
+            { name: 'Cash unchanged fixture', amount: 100, unit: 'USD' },
+          ], liabilities: [{ name: 'Share liability fixture', amount: 0.5, unit: 'MSTR' }] };
+        snapshots = [{ date: yesterday, btcusd: 100000,
+          assets: [{ name: 'Historical shares fixture', value: 10, unit: 'MSTR' }],
+          liabilities: [], unit_prices: { MSTR: 100 } }];
+        historicalPrices = { [yesterday]: 100000, [today]: 100000 };
+        renderAll();
+        await networthMarketFeed.refresh();
+        renderAll();
+        const originalHoldings = JSON.stringify([formState.assets, formState.liabilities]);
+        const rawPrices = captureUnitPrices(today);
+        if (rawPrices.MSTR !== 320 || rawPrices.BTCFX !== 17.89 || rawPrices.IBIT !== 50 || rawPrices.VOO !== 600)
+          return `estimate baseline quotes are missing: ${JSON.stringify(rawPrices)}`;
+        undoStack = []; redoStack = []; actionLog = [];
+        updateUndoRedoButtons();
+
+        await enterBitcoinPrice(120000);
+        const up = getDisplaySnapshot();
+        for (const [code, expected] of Object.entries({ MSTR: 384, BTCFX: 21.468, IBIT: 60 })) {
+          if (!closeTo(up.valuation_prices?.[code], expected))
+            return `120k BTC estimate for ${code} is ${up.valuation_prices?.[code]}, expected ${expected}`;
+        }
+        for (const [code, expected] of Object.entries({ VOO: 600, COIN: 200, MARA: 15, XYZ: 70, HOOD: 25 })) {
+          const row = { amount: 1, unit: code };
+          if (!closeTo(rowValueInUsd(row, up.btcusd, today, up.valuation_prices), expected))
+            return `${code} incorrectly changed with the manual BTC price`;
+        }
+        if (!closeTo(up.totals.assets_usd, 2424.68) || !closeTo(up.totals.liabilities_usd, 192))
+          return `upward estimate totals are wrong: ${JSON.stringify(up.totals)}`;
+        if (!document.querySelector('#assetsMetricUsd').textContent.includes('2,424.68'))
+          return 'estimated asset total did not reach the USD KPI';
+        const status = document.querySelector('#marketQuoteStatus').textContent;
+        if (!/estimated/i.test(status) || !/BTC \+20%/.test(status) || !/manual/i.test(el.quoteTime.textContent))
+          return `estimated share values are not identified: ${status}`;
+        const strategySlice = metricPieChartState.assets.slices.find(slice => slice.name === 'Strategy estimate fixture');
+        const liabilitySlice = metricPieChartState.liabilities.slices.find(slice => slice.name === 'Share liability fixture');
+        if (!closeTo(strategySlice?.value, 960 / 120000) || !closeTo(liabilitySlice?.value, 192 / 120000))
+          return 'asset or liability pie used raw prices while totals used estimates';
+        const filtered = applyExclusionFilters(up, new Set(['Cash unchanged fixture']), new Set());
+        if (!closeTo(filtered.totals.assets_usd, 2324.68))
+          return 'filtering discarded or reapplied the proportional estimate';
+        if (!closeTo(usdToUnitValue(384, 'MSTR', 120000, today, up.valuation_prices), 1))
+          return 'share-denominated conversion did not use the estimated share price';
+
+        document.querySelector('#undoBtn').click();
+        if (isManualOverrideActive() || !closeTo(getDisplaySnapshot().totals.assets_usd, 2188.9))
+          return 'one undo did not restore automatic share valuations after Enter and blur';
+        document.querySelector('#redoBtn').click();
+        if (!closeTo(getDisplaySnapshot().totals.assets_usd, 2424.68))
+          return 'redo did not restore the proportional estimate';
+        await enterBitcoinPrice(80000);
+        const down = getDisplaySnapshot();
+        if (!closeTo(down.valuation_prices?.MSTR, 256) || !closeTo(down.valuation_prices?.BTCFX, 14.312) ||
+            !closeTo(down.valuation_prices?.IBIT, 40) || !closeTo(down.totals.assets_usd, 1953.12))
+          return `lower manual BTC price compounded an earlier estimate: ${JSON.stringify(down.totals)}`;
+        await enterBitcoinPrice(120000);
+        await enterBitcoinPrice(120000);
+        if (!closeTo(getDisplaySnapshot().totals.assets_usd, 2424.68))
+          return 'repeating a manual BTC price compounded the share estimates';
+        if (JSON.stringify([formState.assets, formState.liabilities]) !== originalHoldings)
+          return 'manual BTC estimate modified share quantities';
+
+        formState.unit_prices[todayIso].BTCFX = 20;
+        const manualBase = getDisplaySnapshot();
+        if (!closeTo(manualBase.valuation_prices?.BTCFX, 24) ||
+            marketUsdPrice('BTCFX', todayIso) !== 20 || captureUnitPrices(today).BTCFX !== 20)
+          return 'a manual share price was not used as the unmodified base for the estimate';
+        delete formState.unit_prices[todayIso].BTCFX;
+        formState.btcusd = 0;
+        const missingBaseline = getDisplaySnapshot();
+        if (!closeTo(missingBaseline.totals.assets_usd, 2188.9) ||
+            !closeTo(missingBaseline.valuation_prices?.MSTR ?? marketUsdPrice('MSTR', todayIso), 320))
+          return 'missing automatic BTC price produced an invalid share estimate';
+        formState.btcusd = 100000;
+        renderAll();
+
+        const primary = document.querySelector('#primaryUoaSelect');
+        primary.value = 'MSTR';
+        primary.dispatchEvent(new Event('change', { bubbles: true }));
+        const expectedShares = formatUoaAmount(2424.68 / 384, 'MSTR');
+        if (document.querySelector('#assetsMetric').textContent !== expectedShares)
+          return `share UoA used a raw denominator: ${document.querySelector('#assetsMetric').textContent}`;
+        primary.value = 'BTC';
+        primary.dispatchEvent(new Event('change', { bubbles: true }));
+
+        persistSnapshotForActiveSelection({ render: true, trackAction: false });
+        await networthMarketFeed.refresh();
+        const saved = snapshots.find(snap => snap.date === today);
+        if (!saved || saved.valuation_prices || !closeTo(saved.totals.assets_usd, 2188.9) ||
+            saved.unit_prices?.MSTR !== 320 || saved.unit_prices?.BTCFX !== 17.89 || saved.unit_prices?.IBIT !== 50)
+          return `autosave persisted estimated prices: ${JSON.stringify(saved)}`;
+        if (JSON.stringify(captureUnitPrices(today)) !== JSON.stringify(rawPrices) ||
+            networthMarketFeed.getUsdPrice('MSTR', todayIso) !== 320 ||
+            marketUsdPrice('BTCFX', todayIso) !== 17.89 || usdPerUnit('IBIT', 120000, today) !== 50)
+          return 'estimate mutated a raw feed, saved capture, or ordinary conversion';
+        const restored = parseLiveHistoryCsv(snapshotsToCsv(snapshots));
+        const restoredToday = restored.find(snap => snap.date === today);
+        if (restoredToday?.unit_prices?.MSTR !== 320 || !closeTo(restoredToday?.totals?.assets_usd, 2188.9))
+          return 'CSV roundtrip applied or saved the manual BTC estimate';
+        for (const prices of [{}, { [yesterday]: 100000, [today]: 100000 }]) {
+          historicalPrices = prices;
+          const chart = snapshotsForCharts(120000, new Set(), new Set());
+          if (!closeTo(chart.find(snap => snap.date === today)?.totals.assets_usd, 2424.68) ||
+              !closeTo(chart.find(snap => snap.date === yesterday)?.totals.assets_usd, 1000))
+            return 'saved prices were scaled twice or historical chart prices were changed';
+        }
+        editingSnapshotDate = yesterday;
+        formState.assets = [{ name: 'Historical shares fixture', amount: 10, unit: 'MSTR' }];
+        formState.liabilities = [];
+        const historical = getDisplaySnapshot();
+        if (historical.valuation_prices || !closeTo(historical.totals.assets_usd, 1000))
+          return 'manual BTC estimate leaked into the historical editor';
+        editingSnapshotDate = today;
+        [formState.assets, formState.liabilities] = JSON.parse(originalHoldings);
+        renderAll();
+
+        document.querySelector('#refreshQuoteBtn').click();
+        for (let i = 0; i < 100 && (isManualOverrideActive() || isTrackingAction); i++) {
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        renderAll();
+        if (isManualOverrideActive() || !closeTo(getDisplaySnapshot().totals.assets_usd, 2188.9))
+          return 'Refresh did not restore automatic prices';
+        if (/estimated/i.test(document.querySelector('#marketQuoteStatus').textContent))
+          return 'estimate status remained after returning to automatic prices';
+      } finally {
+        await settleEditor();
+        window.prompt = prior.prompt;
+        enabledUnitCodes = prior.enabled;
+        localStorage.setItem(ENABLED_UNITS_KEY, JSON.stringify([...prior.enabled]));
+        historicalPrices = prior.prices;
+        restoreTrackedState(prior.state);
+        await saveLiveSnapshotsToServer();
+        undoStack = prior.undo; redoStack = prior.redo; actionLog = prior.log;
+        manualEditedThisSession = prior.edited;
+        updateUndoRedoButtons();
+        networthMarketFeed.start();
+        renderAll();
+      }
+    """)
+
+
 def check_save_races(browser):
     browser.check("delayed encrypted saves stay on the original file and latest generation", r"""
       const prior = { snapshots, file: liveHistoryFile, password: liveEncryptionPassword,
@@ -777,6 +963,7 @@ def main():
             check_existing_conversions(browser)
             check_dated_crypto_prices(browser)
             check_historical_filters(browser)
+            check_manual_bitcoin_estimates(browser)
             check_save_races(browser)
             browser.evaluate("saveLiveSnapshotsToServer()")
             cdp.command("Page.navigate", {"url": dashboard_url})
