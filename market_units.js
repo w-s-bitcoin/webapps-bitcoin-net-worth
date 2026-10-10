@@ -2,6 +2,7 @@
  * BTC, fiat and metals retain the dashboard's existing published rate sources.
  * Coinbase spot/date API: https://docs.cdp.coinbase.com/coinbase-app/track-apis/prices
  * Stocks and ETFs use the public, delayed TradingView scanner used by DCA Comparison.
+ * BTCFX uses CNBC's public daily NAV quote, with its pricing date kept intact.
  */
 (function () {
   "use strict";
@@ -9,6 +10,7 @@
   const POLL_MS = 60000;
   const TIMEOUT_MS = 12000;
   const CACHE_KEY = "bitcoinNetWorthTrackerMarketQuotesV1";
+  const BTCFX_NAV_URL = "https://quote.cnbc.com/quote-html-webservice/quote.htm?symbols=BTCFX&requestMethod=itv&noform=1&fund=1&exthrs=1&output=json";
   const STOCK_TICKERS = Object.freeze({
     MSTR: "NASDAQ:MSTR", COIN: "NASDAQ:COIN", XYZ: "NYSE:XYZ",
     MARA: "NASDAQ:MARA", CLSK: "NASDAQ:CLSK", RIOT: "NASDAQ:RIOT",
@@ -60,6 +62,7 @@
     ["MARA", "MARA Holdings"], ["CLSK", "CleanSpark"], ["RIOT", "Riot Platforms"],
     ["HUT", "Hut 8"], ["IREN", "IREN"], ["CORZ", "Core Scientific"],
     ["BTDR", "Bitdeer"], ["HOOD", "Robinhood"],
+    ["BTCFX", "Bitcoin ProFund (Investor Class)"],
   ].map(([code, name]) => ({ code, name, decimals: 6, suffix: `${code} shares`, kind: "stock" }));
   const etfs = [
     ["SPY", "State Street SPDR S&P 500 ETF Trust"], ["VOO", "Vanguard S&P 500 ETF"],
@@ -248,6 +251,34 @@
       });
     }
 
+    async function pollBtcfx(requestEpoch) {
+      return once(`${requestEpoch}:BTCFX:current`, async () => {
+        try {
+          const payload = await fetchJson(BTCFX_NAV_URL, { credentials: "omit" });
+          const items = payload?.ITVQuoteResult?.ITVQuote;
+          const item = Array.isArray(items) ? items.find((entry) => entry?.symbol === "BTCFX") : null;
+          // CNBC flags this as realTime, but a mutual fund publishes a daily NAV.
+          // Parse its US calendar date explicitly instead of treating receipt time as pricing time.
+          const date = /^(\d{2})\/(\d{2})\/(\d{2}) (?:EST|EDT)$/.exec(item?.last_timedate || "");
+          const day = date ? `20${date[3]}-${date[1]}-${date[2]}` : "";
+          if (item?.code !== "0" || item.type !== "FUND" || item.currencyCode !== "USD"
+              || !["string", "number"].includes(typeof item.last) || !positive(item.last)
+              || !validDay(day) || day > localDay()) {
+            throw new Error("Invalid BTCFX NAV quote");
+          }
+          if (epoch !== requestEpoch || !selected.has("BTCFX")) return;
+          const previous = quotes.get("BTCFX");
+          if (previous && day < previous.day) throw new Error("Superseded BTCFX NAV quote");
+          quotes.set("BTCFX", {
+            price: Number(item.last), day, checkedAt: Date.now(), source: "CNBC",
+            delayLabel: `Daily NAV as of ${day} · CNBC`, connected: true,
+          });
+        } catch (_) {
+          if (epoch === requestEpoch) retain("BTCFX");
+        }
+      });
+    }
+
     async function refresh({ isoDate } = {}) {
       const day = isoDate || localDay();
       if (!validDay(day) || day > localDay()) return false;
@@ -258,6 +289,7 @@
         // A current equity quote never values a past date. The comparison CSV
         // contains adjusted closes, which cannot safely value as-held shares.
         ...(day === localDay() ? [pollStocks(codes.filter((code) => STOCK_TICKERS[code]), requestEpoch)] : []),
+        ...(day === localDay() && selected.has("BTCFX") ? [pollBtcfx(requestEpoch)] : []),
       ]);
       if (requestEpoch !== epoch) return false;
       persist();

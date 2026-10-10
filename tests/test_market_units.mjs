@@ -16,6 +16,9 @@ const timers = new Map();
 const storage = new Map();
 const events = new Map();
 const fixturePrices = { MSTR: 320, COIN: 180, ETH: 2500, SOL: 150, VOO: 600, IBIT: 50 };
+const validNav = { symbol: 'BTCFX', code: '0', type: 'FUND', currencyCode: 'USD',
+  last: '17.89', last_timedate: '10/07/26 EDT', realTime: 'true' };
+let navQuote = { ...validNav };
 const window = {
   localStorage: { getItem: (key) => storage.get(key), setItem: (key, value) => storage.set(key, value) },
   setTimeout(callback, delay) { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; },
@@ -34,7 +37,9 @@ const sandbox = {
     if (releaseRequest) await new Promise((resolve) => { releaseRequest.resolve = resolve; });
     if (failing) throw new Error('Fixture feed offline');
     let data;
-    if (url.includes('tradingview')) {
+    if (url.includes('quote.cnbc.com')) {
+      data = { ITVQuoteResult: { ITVQuote: [navQuote] } };
+    } else if (url.includes('tradingview')) {
       const { symbols } = JSON.parse(options.body);
       data = { data: symbols.tickers.map((ticker) => ({
         s: ticker, d: [fixturePrices[ticker.split(':')[1]] ?? null, 'delayed_streaming_900'],
@@ -85,6 +90,51 @@ assert.equal(etfFeed.getUsdPrice('VOO') * 2.5, 1500);
 assert.equal(etfFeed.getUsdPrice('IBIT') * 12.5, 625);
 assert.equal(etfFeed.getQuote('IBIT').delayLabel, '15m delayed');
 assert.equal(etfFeed.getUsdPrice('IBIT', '2024-01-01'), null, 'current ETF quotes cannot value historical shares');
+
+// Mutual funds expose the actual NAV date even when a provider calls the quote real-time.
+const navFeed = api.create();
+navFeed.setActiveCodes(['BTCFX']);
+const beforeNav = requests.length;
+await Promise.all([navFeed.refresh(), navFeed.refresh()]);
+assert.equal(requests.length, beforeNav + 1, 'concurrent NAV refreshes deduplicate');
+assert.ok(requests.at(-1).url.includes('symbols=BTCFX'));
+assert.equal(requests.at(-1).options.credentials, 'omit');
+assert.equal(navFeed.getUsdPrice('BTCFX') * 12.5, 223.625, 'fractional fund shares use per-share NAV');
+assert.equal(navFeed.getQuote('BTCFX').day, '2026-10-07', 'NAV date is not the retrieval day');
+assert.equal(navFeed.getQuote('BTCFX').delayLabel, 'Daily NAV as of 2026-10-07 · CNBC');
+assert.equal(navFeed.getQuote('BTCFX').status, 'current');
+assert.equal(navFeed.getUsdPrice('BTCFX', '2024-01-01'), null, 'latest NAV cannot backdate a holding');
+const beforeNavHistory = requests.length;
+await navFeed.refresh({ isoDate: '2024-01-01' });
+assert.equal(requests.length, beforeNavHistory, 'past dates do not request latest NAV');
+for (const invalid of [
+  { symbol: 'OTHER' }, { code: '1' }, { type: 'STOCK' }, { currencyCode: 'EUR' },
+  { last: 'NaN' }, { last: 0 }, { last: true }, { last: Infinity },
+  { last_timedate: '02/30/26 EST' }, { last_timedate: '10/09/26 EDT' },
+  { last_timedate: '10/06/26 EDT' }, { last_timedate: 'invalid' },
+]) {
+  navQuote = { ...validNav, last: '99.00', ...invalid };
+  await navFeed.refresh();
+  assert.equal(navFeed.getUsdPrice('BTCFX'), 17.89, `invalid/stale NAV rejected: ${JSON.stringify(invalid)}`);
+  assert.equal(navFeed.getQuote('BTCFX').status, 'retained');
+}
+navQuote = { ...validNav, last: '18.25', last_timedate: '10/08/26 EDT' };
+await navFeed.refresh();
+assert.equal(navFeed.getUsdPrice('BTCFX'), 18.25, 'the next published NAV updates automatically');
+assert.equal(navFeed.getQuote('BTCFX').day, today);
+failing = true;
+await navFeed.refresh();
+assert.equal(navFeed.getUsdPrice('BTCFX'), 18.25, 'outages retain the latest NAV');
+assert.equal(navFeed.getQuote('BTCFX').status, 'retained');
+const restoredNav = api.create();
+assert.equal(restoredNav.getUsdPrice('BTCFX'), 18.25, 'NAV survives an offline reload');
+assert.equal(restoredNav.getQuote('BTCFX').day, today);
+assert.equal(restoredNav.getQuote('BTCFX').status, 'retained');
+failing = false;
+navFeed.setActiveCodes([]);
+const beforeNavDeselection = requests.length;
+await navFeed.refresh();
+assert.equal(requests.length, beforeNavDeselection, 'unused BTCFX does not request NAV');
 
 const historicRequestCount = requests.length;
 await feed.refresh({ isoDate: '2024-01-01' });

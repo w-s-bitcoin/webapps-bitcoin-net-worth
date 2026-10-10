@@ -22,6 +22,7 @@ Requires Python 3 on PATH. Opens the app at `http://127.0.0.1:8081/`.
 - Tracks assets and liabilities in configurable units of account, defaulting to USD, BTC, and sats.
 - Settings beside the title enables major currencies, cryptocurrencies, Bitcoin-related stocks, and broad-market, bond, commodity, and Bitcoin ETFs. Click a category heading to expand or collapse it; its count shows selected units.
 - Stock and ETF amounts are share counts, including fractional shares. Hiding a unit keeps existing holdings intact.
+- BTCFX uses CNBC’s latest daily NAV automatically, with its pricing date displayed and its last price retained during outages.
 - Public crypto spot/date quotes and delayed stock/ETF quotes support valuations. Historical stock valuations use saved or manually entered prices; unavailable prices show an em dash and omit affected chart dates.
 - Saved CSV and encrypted files retain share quantities, BTC/USD rates, and dated market prices. Older files remain readable.
 - Supports demo mode and live mode.

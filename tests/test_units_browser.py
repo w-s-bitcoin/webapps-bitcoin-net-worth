@@ -29,7 +29,16 @@ CHROME = os.environ.get("CHROME_BIN", "/Applications/Google Chrome.app/Contents/
 SHIM = r"""
 (() => {
   const nativeFetch = window.fetch.bind(window);
-  window.__netWorthFixture = { offline: false, requests: [] };
+  const navDate = new Date();
+  navDate.setDate(navDate.getDate() - 1);
+  const navMonth = String(navDate.getMonth() + 1).padStart(2, '0');
+  const navDay = String(navDate.getDate()).padStart(2, '0');
+  const navYear = String(navDate.getFullYear());
+  window.__netWorthFixture = {
+    offline: false, btcfxOffline: false, requests: [],
+    btcfxDay: `${navYear}-${navMonth}-${navDay}`,
+    btcfxTimestamp: `${navMonth}/${navDay}/${navYear.slice(-2)} EDT`,
+  };
   class PriceSocket {
     constructor() {
       setTimeout(() => {
@@ -59,6 +68,17 @@ SHIM = r"""
       return jsonResponse({ data: (body.symbols?.tickers || [])
         .filter((ticker) => ['MSTR', 'IBIT', 'VOO'].includes(ticker.split(':')[1]))
         .map((ticker) => ({ s: ticker, d: [{ MSTR: 320, IBIT: 50, VOO: 600 }[ticker.split(':')[1]], 'delayed_streaming_900'] })) });
+    }
+    if (url.hostname === 'quote.cnbc.com' && url.pathname === '/quote-html-webservice/quote.htm') {
+      fixture.requests.push({ url: raw });
+      if (fixture.offline || fixture.btcfxOffline)
+        return Promise.reject(new TypeError('fixture BTCFX feed offline'));
+      if (url.searchParams.get('symbols') !== 'BTCFX')
+        return Promise.resolve(new Response('{}', { status: 404 }));
+      return jsonResponse({ ITVQuoteResult: { ITVQuote: [{
+        symbol: 'BTCFX', code: '0', type: 'FUND', currencyCode: 'USD',
+        last: '17.89', last_timedate: fixture.btcfxTimestamp,
+      }] } });
     }
     if (url.hostname === 'api.coinbase.com' && url.pathname.includes('/prices/')) {
       fixture.requests.push({ url: raw });
@@ -138,7 +158,7 @@ def check_settings(browser):
         .map(input => input.value).sort();
       if (JSON.stringify(checked) !== JSON.stringify(['BTC', 'USD', 'sats']))
         return `unexpected default units: ${checked}`;
-      for (const code of ['EUR', 'GBP', 'JPY', 'ETH', 'SOL', 'MSTR', 'COIN', 'MARA', 'SPY', 'VOO', 'QQQ', 'IBIT', 'FBTC']) {
+      for (const code of ['EUR', 'GBP', 'JPY', 'ETH', 'SOL', 'MSTR', 'COIN', 'MARA', 'SPY', 'VOO', 'QQQ', 'IBIT', 'FBTC', 'BTCFX']) {
         if (!document.querySelector(`#netWorthUnitOptions input[value="${code}"]`))
           return `missing catalog unit ${code}`;
       }
@@ -301,6 +321,97 @@ def check_etfs(browser):
       setUnitEnabled('VOO', false);
       search.value = '';
       search.dispatchEvent(new Event('input', { bubbles: true }));
+    """)
+
+
+def check_btcfx(browser):
+    browser.open_settings()
+    browser.check("BTCFX daily NAV, retention, and manual override", r"""
+      const prior = { form: formState, snapshots, date: editingSnapshotDate,
+        enabled: enabledUnitCodes.has('BTCFX'), prompt: window.prompt };
+      const fixture = window.__netWorthFixture;
+      networthMarketFeed.stop();
+      try {
+        const search = document.querySelector('#netWorthUnitSearch');
+        search.value = 'btcfx';
+        search.dispatchEvent(new Event('input', { bubbles: true }));
+        const choice = document.querySelector('#netWorthUnitOptions input[value=BTCFX]');
+        if (!choice || !choice.getClientRects().length) return 'BTCFX cannot be found in settings';
+        if (!choice.checked) choice.click();
+        if (![...document.querySelector('#primaryUoaSelect').options].some(option => option.value === 'BTCFX'))
+          return 'enabled BTCFX missing from valuation dropdown';
+        document.querySelector('#netWorthSettingsClose').click();
+
+        const today = mmddyy(new Date());
+        editingSnapshotDate = today;
+        snapshots = [];
+        formState = { ...freshFormState('live'), btcusd: 100000,
+          assets: [{ name: 'Bitcoin mutual fund fixture', amount: 12.5, unit: 'USD' }], liabilities: [] };
+        renderAll();
+        const unit = document.querySelector('#assetsRows select');
+        unit.value = 'BTCFX';
+        unit.dispatchEvent(new Event('change', { bubbles: true }));
+        await networthMarketFeed.refresh();
+        renderAll();
+        if (formState.assets[0]?.unit !== 'BTCFX' || Number(formState.assets[0]?.amount) !== 12.5)
+          return 'selecting BTCFX changed the fractional share quantity';
+        const assets = [{ name: 'Bitcoin mutual fund fixture', value: 12.5, unit: 'BTCFX' }];
+        const total = computeTotals(assets, [], 100000, today);
+        if (!total.complete || Math.abs(total.assets_usd - 223.625) > 1e-9)
+          return `BTCFX fractional shares valued incorrectly: ${JSON.stringify(total)}`;
+        if (!document.querySelector('#assetsMetricUsd').textContent.includes('223.63'))
+          return 'BTCFX NAV valuation did not reach the displayed total';
+        const status = () => document.querySelector('#marketQuoteStatus').textContent;
+        if (!status().includes(`Daily NAV as of ${fixture.btcfxDay}`) || !status().includes('CNBC'))
+          return `BTCFX price status lost its NAV date or source: ${status()}`;
+        if (!fixture.requests.some(request => request.url.includes('quote.cnbc.com/') &&
+            new URL(request.url).searchParams.get('symbols') === 'BTCFX'))
+          return 'BTCFX did not use the public NAV feed';
+        if (usdPerUnit('BTCFX', 100000, '010124') !== null ||
+            computeTotals(assets, [], 100000, '010124').complete !== false)
+          return 'current BTCFX NAV leaked into an unsaved historical date';
+
+        fixture.btcfxOffline = true;
+        await networthMarketFeed.refresh();
+        renderAll();
+        if (usdPerUnit('BTCFX', 100000, today) !== 17.89 || !status().includes('retained'))
+          return `BTCFX outage did not retain and label the last NAV: ${status()}`;
+        if (!status().includes(`Daily NAV as of ${fixture.btcfxDay}`))
+          return 'retained BTCFX NAV lost its actual pricing date';
+
+        window.prompt = () => '20';
+        const setPrice = [...document.querySelectorAll('#marketQuoteStatus button')]
+          .find(button => button.textContent === 'Set a price');
+        if (!setPrice) return 'BTCFX manual price control is missing';
+        setPrice.click();
+        fixture.btcfxOffline = false;
+        await networthMarketFeed.refresh();
+        renderAll();
+        if (usdPerUnit('BTCFX', 100000, today) !== 20 ||
+            computeTotals(assets, [], 100000, today).assets_usd !== 250 ||
+            !status().includes('Manual price'))
+          return `automatic BTCFX NAV replaced the manual price: ${status()}`;
+      } finally {
+        // Let the standalone unit selector finish focusing its amount field,
+        // then leave the editor before restoring the previous test state.
+        await new Promise(resolve => setTimeout(resolve, 0));
+        document.activeElement?.blur();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        fixture.btcfxOffline = false;
+        window.prompt = prior.prompt;
+        formState = prior.form;
+        snapshots = prior.snapshots;
+        editingSnapshotDate = prior.date;
+        setUnitEnabled('BTCFX', prior.enabled);
+        const search = document.querySelector('#netWorthUnitSearch');
+        search.value = '';
+        search.dispatchEvent(new Event('input', { bubbles: true }));
+        document.querySelector('#netWorthSettingsClose').click();
+        saveForm();
+        await saveLiveSnapshotsToServer();
+        networthMarketFeed.start();
+        renderAll();
+      }
     """)
 
 
@@ -662,6 +773,7 @@ def main():
             check_categories(browser)
             check_holdings(browser)
             check_etfs(browser)
+            check_btcfx(browser)
             check_existing_conversions(browser)
             check_dated_crypto_prices(browser)
             check_historical_filters(browser)
